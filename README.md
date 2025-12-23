@@ -47,8 +47,13 @@ Visual models of state, reasoning flows, and multi-agent coordination.
 
 ---
 
-### 🔹 Experiments
-Sandbox explorations and architectural probes.
+### 🔹 Books
+Deep study and systems translation of foundational books on agentic AI. Each book is treated as a design substrate to be interrogated, stress-tested, and translated into modern agent architectures.
+
+---
+
+### 🔹 Essays/Papers
+Original technical writing, architectural analysis, and research documentation exploring agent systems, reasoning patterns, and design principles.
 
 ---
 
