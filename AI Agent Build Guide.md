@@ -63,6 +63,7 @@ The AGI Architecture Blueprint, 9-Phase Roadmap, and Systems Diagrams are advanc
 • State Scope & Ownership (Local vs Global State)
 • Memory Lifecycle & Anti-Bloat Patterns
 • State Persistence: Checkpoints, Event Logs, and Replay
+• Observability: Mapping State Updates to Telemetry (Without State Dumps)
 • Tier 0 · Prereqs & Principles
 • Tier 1 · Basic Agent (MVP Chat + Single Tool)
 • Tier 2 · Intermediate Agent (RAG + Tools + Simple Memory)
@@ -1973,6 +1974,629 @@ Before deploying checkpoint/replay logic:
 ---
 
 **Remember:** Persistence is insurance against failure. Checkpoint conservatively early in development, optimize cadence as you understand failure modes. The best checkpoint strategy is the one you test before you need it.
+
+⸻
+
+## Observability: Mapping State Updates to Telemetry (Without State Dumps)
+
+**Concept Capsule:**
+Every agent state update creates an observability decision: log it, ignore it, or something in between. Dumping full state at every step creates noise, bloats storage, and obscures real issues. This module teaches taxonomy-driven telemetry — map each state update category to the right observability primitive, capture only what matters, and build traces that reveal agent behavior without drowning in data.
+
+**Learning Objectives**
+• Apply the four-category state update taxonomy to observability decisions
+• Map state updates to appropriate telemetry forms (spans, events, logs, metrics)
+• Implement large payload handling strategies (hashing, summarization, out-of-band storage)
+• Build OpenTelemetry-aligned instrumentation without vendor lock-in
+• Recognize and avoid the "full state dump" anti-pattern
+
+---
+
+### The Four-Category Observability Taxonomy
+
+Recall from State Management foundations: not all state updates are equal. They fall into four categories, each requiring different observability treatment.
+
+#### **Category 1: Ephemeral Reasoning Updates**
+
+**Definition:** Internal, high-frequency state changes that exist only to reach the next reasoning step.
+
+**Examples:**
+- Intermediate calculations during planning
+- Scratchpad variables
+- Token-level reasoning states
+- Draft thoughts before final formulation
+
+**Observability Decision:** **Do NOT capture in production telemetry.**
+
+**Why:**
+- High volume → noise
+- Low long-term value → storage waste
+- Often contains sensitive partial thoughts → privacy/security risk
+- Doesn't affect observable behavior → debugging value is minimal
+
+**Exception:** In development/debug mode, you MAY capture these in verbose logs with **short retention** (hours, not days).
+
+**Implementation:**
+```python
+import logging
+
+logger = logging.getLogger(__name__)
+
+def reasoning_node(state: AgentState) -> dict:
+    # Ephemeral scratchpad — only log in debug mode
+    draft_plan = generate_draft(state["messages"])
+    confidence = calculate_confidence(draft_plan)
+    
+    # ❌ WRONG: Don't log ephemeral reasoning in production
+    # logger.info(f"Draft plan: {draft_plan}")  
+    
+    # ✅ CORRECT: Debug-only, short retention
+    logger.debug(f"Reasoning scratch: confidence={confidence}")  
+    
+    # Only final decision enters telemetry
+    final_plan = select_best_plan(draft_plan, confidence)
+    return {"plan": final_plan}
+```
+
+---
+
+#### **Category 2: Decision-Relevant Updates**
+
+**Definition:** State changes that affect which action the agent takes next.
+
+**Examples:**
+- Plan modifications or revisions
+- Branch selection in conditional logic ("route to retrieval" vs "direct answer")
+- Retry decisions after failures
+- Confidence threshold crossings
+- Tool selection decisions
+
+**Observability Decision:** **Capture as structured events or span attributes.**
+
+**Why:**
+- These form the "decision trace" — the audit trail explaining agent behavior
+- Essential for debugging ("why did it choose X instead of Y?")
+- Enables evaluation ("how often does it make correct routing decisions?")
+- Low-to-medium frequency → manageable volume
+
+**Implementation:**
+```python
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
+
+def route_query_node(state: AgentState) -> dict:
+    with tracer.start_as_current_span("query_routing") as span:
+        query = state["messages"][-1].content
+        query_length = len(query)
+        
+        # Decision logic
+        if query_length > 100:
+            route = "detailed_retrieval"
+            reason = "query_length_threshold"
+        else:
+            route = "quick_lookup"
+            reason = "short_query"
+        
+        # ✅ CORRECT: Capture decision as span attributes
+        span.set_attribute("agent.decision.type", "routing")
+        span.set_attribute("agent.decision.route", route)
+        span.set_attribute("agent.decision.reason", reason)
+        span.set_attribute("agent.decision.query_length", query_length)
+        
+        return {"routing_decision": route}
+```
+
+**Telemetry Output (OpenTelemetry):**
+```json
+{
+  "span": "query_routing",
+  "attributes": {
+    "agent.decision.type": "routing",
+    "agent.decision.route": "detailed_retrieval",
+    "agent.decision.reason": "query_length_threshold",
+    "agent.decision.query_length": 127
+  },
+  "duration_ms": 45
+}
+```
+
+---
+
+#### **Category 3: External Interaction Updates**
+
+**Definition:** State changes resulting from interaction with systems outside the agent.
+
+**Examples:**
+- Tool calls and their responses
+- API requests and results
+- Database queries
+- User inputs and agent outputs
+- File system operations
+
+**Observability Decision:** **Always capture with full request/response details (or hashes/summaries for large payloads).**
+
+**Why:**
+- Mandatory for debugging ("what did the API return?")
+- Required for cost tracking ("how many API calls?")
+- Compliance requirements ("what external data was accessed?")
+- Reproducibility ("can we replay this interaction?")
+
+**Implementation:**
+```python
+def tool_call_node(state: AgentState) -> dict:
+    with tracer.start_as_current_span("tool_execution") as span:
+        tool_name = "web_search"
+        tool_input = {"query": state["search_query"], "limit": 5}
+        
+        # ✅ CORRECT: Log input before execution
+        span.set_attribute("agent.tool.name", tool_name)
+        span.set_attribute("agent.tool.input", json.dumps(tool_input))
+        
+        # Execute tool
+        start_time = time.time()
+        try:
+            result = web_search_api.search(**tool_input)
+            success = True
+            error = None
+        except Exception as e:
+            result = None
+            success = False
+            error = str(e)
+        finally:
+            duration = time.time() - start_time
+        
+        # ✅ CORRECT: Log output and metadata
+        span.set_attribute("agent.tool.success", success)
+        span.set_attribute("agent.tool.duration_ms", duration * 1000)
+        
+        if success:
+            # Handle large payloads (see section below)
+            output_summary = summarize_tool_output(result)
+            span.set_attribute("agent.tool.output_summary", output_summary)
+            span.set_attribute("agent.tool.output_size_bytes", len(str(result)))
+        else:
+            span.set_attribute("agent.tool.error", error)
+            span.set_status(trace.Status(trace.StatusCode.ERROR, error))
+        
+        return {"tool_result": result, "tool_success": success}
+```
+
+---
+
+#### **Category 4: Memory-Qualifying Updates**
+
+**Definition:** State changes that should persist beyond the current task — candidates for long-term memory.
+
+**Examples:**
+- User preferences discovered
+- Successful novel strategies
+- Error patterns with resolutions
+- User corrections or feedback
+- Domain knowledge extracted
+
+**Observability Decision:** **Capture as events AND trigger memory write operations.**
+
+**Why:**
+- These represent learning opportunities
+- Must be logged for audit trail ("when did we learn this?")
+- Memory write itself is an important event to track
+- Enables analysis of what the agent is learning over time
+
+**Implementation:**
+```python
+def observe_outcome_node(state: AgentState) -> dict:
+    with tracer.start_as_current_span("outcome_observation") as span:
+        # Detect memory-qualifying event
+        if state["user_feedback"] == "prefer_concise":
+            memory_event = {
+                "type": "user_preference",
+                "content": "User prefers concise responses without bullet points",
+                "confidence": 0.9,
+                "source_task_id": state["task_id"]
+            }
+            
+            # ✅ CORRECT: Log memory formation event
+            span.add_event(
+                "memory_qualifying_update",
+                attributes={
+                    "memory.type": "semantic",
+                    "memory.category": "user_preference",
+                    "memory.confidence": 0.9,
+                    "memory.content_hash": hash(memory_event["content"])
+                }
+            )
+            
+            # Queue for memory write
+            pending_memories = state.get("pending_memories", [])
+            pending_memories.append(memory_event)
+            
+            return {"pending_memories": pending_memories}
+        
+        return {}
+```
+
+---
+
+### Taxonomy-to-Telemetry Mapping Table
+
+| **Category** | **What to Capture** | **Telemetry Form** | **Example Attributes** | **Retention** |
+|--------------|---------------------|-------------------|----------------------|---------------|
+| **Ephemeral Reasoning** | Nothing (production) <br> Confidence scores (debug) | Debug logs only | `reasoning.confidence: 0.85` <br> `reasoning.step: draft_plan` | Hours (debug mode) <br> None (production) |
+| **Decision-Relevant** | Decision type, chosen action, reason, context | Span attributes <br> Structured events | `decision.type: routing` <br> `decision.route: retrieval` <br> `decision.reason: query_complexity` <br> `decision.alternatives: [direct, search]` | 30-90 days |
+| **External Interaction** | Tool/API name, input, output (or hash), duration, success/failure, cost | Spans (for duration) <br> Events (for I/O) <br> Metrics (for cost) | `tool.name: web_search` <br> `tool.input_hash: abc123` <br> `tool.output_size_bytes: 4096` <br> `tool.duration_ms: 450` <br> `tool.cost_usd: 0.002` <br> `tool.success: true` | 90+ days (compliance) |
+| **Memory-Qualifying** | Memory type, content hash, confidence, source | Span events <br> Structured logs | `memory.type: episodic` <br> `memory.content_hash: xyz789` <br> `memory.confidence: 0.92` <br> `memory.source_task: task_456` <br> `memory.write_success: true` | 1+ year (learning audit) |
+
+**Key Patterns:**
+- **Spans** → Duration-tracked operations (tool calls, node executions)
+- **Span Attributes** → Metadata about what happened (decisions, parameters)
+- **Span Events** → Point-in-time occurrences within a span (memory formation, errors)
+- **Logs** → Unstructured or semi-structured debug info (fallback for complex data)
+- **Metrics** → Aggregatable counters/gauges (cost, latency, success rate)
+
+---
+
+### Anti-Pattern: Full State Dumps Every Step
+
+**What It Looks Like:**
+```python
+# ❌ ANTI-PATTERN: Logging entire state at every node
+def bad_node(state: AgentState) -> dict:
+    logger.info(f"State at node entry: {json.dumps(state, indent=2)}")
+    
+    # ... node logic ...
+    
+    logger.info(f"State at node exit: {json.dumps(state, indent=2)}")
+    return updated_fields
+```
+
+**Why This Fails:**
+1. **Volume Explosion** — State can be 10KB-100KB per node × dozens of nodes = MB per task
+2. **Signal-to-Noise Ratio Collapses** — Logs become unreadable, obscuring real issues
+3. **Privacy/Security Risks** — State may contain PII, API keys, sensitive user data
+4. **Storage Costs** — Log storage costs scale linearly with task volume
+5. **Performance Impact** — Serializing large state objects adds latency
+6. **Debugging Becomes Harder** — Searching through massive state dumps is slower than querying structured attributes
+
+**The Correct Approach:**
+```python
+# ✅ CORRECT: Log only state changes (deltas)
+def good_node(state: AgentState) -> dict:
+    with tracer.start_as_current_span("process_node") as span:
+        # Capture relevant context, not full state
+        span.set_attribute("state.message_count", len(state.get("messages", [])))
+        span.set_attribute("state.retry_count", state.get("retry_count", 0))
+        
+        # ... node logic ...
+        updated_fields = {"retry_count": state["retry_count"] + 1}
+        
+        # Log what changed, not what didn't
+        span.add_event(
+            "state_update",
+            attributes={
+                "updated_fields": list(updated_fields.keys()),
+                "retry_count.new": updated_fields["retry_count"]
+            }
+        )
+        
+        return updated_fields
+```
+
+**Rule:** Log state transitions, not state snapshots. Capture deltas, not full objects.
+
+---
+
+### Large Payload Handling Strategies
+
+When state updates involve large data (retrieved documents, tool outputs, images), naive logging fails. Use these strategies:
+
+#### **Strategy 1: Hash Instead of Content**
+
+**When:** Content is large but identity/integrity matters.
+
+```python
+import hashlib
+
+def hash_content(content: str) -> str:
+    return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+def retrieve_node(state: AgentState) -> dict:
+    with tracer.start_as_current_span("document_retrieval") as span:
+        docs = vector_store.similarity_search(state["query"], k=5)
+        
+        # ❌ WRONG: Log full document content (could be 50KB)
+        # span.set_attribute("retrieved_docs", json.dumps(docs))
+        
+        # ✅ CORRECT: Log hashes + metadata
+        span.set_attribute("retrieved_docs.count", len(docs))
+        span.set_attribute(
+            "retrieved_docs.hashes",
+            [hash_content(doc.page_content) for doc in docs]
+        )
+        span.set_attribute(
+            "retrieved_docs.total_size_bytes",
+            sum(len(doc.page_content) for doc in docs)
+        )
+        
+        return {"retrieved_docs": docs}
+```
+
+**Benefit:** Can verify "did we retrieve the same docs?" without storing full content.
+
+---
+
+#### **Strategy 2: Summarize Before Logging**
+
+**When:** Content has semantic meaning that's useful for debugging.
+
+```python
+def summarize_documents(docs: list[Document], max_chars: int = 200) -> str:
+    """Create a brief summary of retrieved documents"""
+    if not docs:
+        return "[no documents]"
+    
+    summary_parts = []
+    for i, doc in enumerate(docs[:3]):  # Only first 3
+        snippet = doc.page_content[:50] + "..."
+        summary_parts.append(f"Doc{i+1}: {snippet}")
+    
+    return " | ".join(summary_parts)[:max_chars]
+
+def retrieve_node(state: AgentState) -> dict:
+    with tracer.start_as_current_span("document_retrieval") as span:
+        docs = vector_store.similarity_search(state["query"], k=5)
+        
+        # ✅ CORRECT: Log summary, not full content
+        span.set_attribute("retrieved_docs.summary", summarize_documents(docs))
+        span.set_attribute("retrieved_docs.count", len(docs))
+        
+        return {"retrieved_docs": docs}
+```
+
+**Benefit:** Human-readable context without payload bloat.
+
+---
+
+#### **Strategy 3: Store Out-of-Band, Log Pointer**
+
+**When:** Full content is needed for debugging but too large for telemetry.
+
+```python
+def store_payload_artifact(content: str, task_id: str, artifact_type: str) -> str:
+    """Store large payload in blob storage, return reference ID"""
+    artifact_id = f"{task_id}_{artifact_type}_{uuid.uuid4().hex[:8]}"
+    
+    # Store in S3, GCS, Azure Blob, or local file system
+    blob_store.put(artifact_id, content)
+    
+    return artifact_id
+
+def generate_answer_node(state: AgentState) -> dict:
+    with tracer.start_as_current_span("answer_generation") as span:
+        # Generate potentially large answer
+        answer = llm.generate(
+            state["messages"],
+            context=state["retrieved_docs"]
+        )
+        
+        # ✅ CORRECT: Store full answer out-of-band, log pointer
+        if len(answer) > 1000:
+            artifact_id = store_payload_artifact(
+                answer,
+                state["task_id"],
+                "generated_answer"
+            )
+            span.set_attribute("answer.artifact_id", artifact_id)
+            span.set_attribute("answer.size_bytes", len(answer))
+            span.set_attribute("answer.truncated", answer[:200] + "...")
+        else:
+            # Small enough to log directly
+            span.set_attribute("answer.content", answer)
+        
+        return {"final_answer": answer}
+```
+
+**Benefit:** Full content preserved for debugging, telemetry stays lean.
+
+**Retrieval Pattern:**
+```python
+# Later, when debugging
+artifact_id = span.attributes["answer.artifact_id"]
+full_answer = blob_store.get(artifact_id)
+```
+
+---
+
+#### **Strategy 4: Adaptive Truncation**
+
+**When:** Content varies in size; you want full content for small payloads, truncation for large.
+
+```python
+def adaptive_log(span, key: str, content: str, max_size: int = 500):
+    """Log content with adaptive truncation"""
+    if len(content) <= max_size:
+        span.set_attribute(key, content)
+    else:
+        span.set_attribute(f"{key}.truncated", content[:max_size] + "...")
+        span.set_attribute(f"{key}.full_size_bytes", len(content))
+        span.set_attribute(f"{key}.content_hash", hash_content(content))
+
+def tool_node(state: AgentState) -> dict:
+    with tracer.start_as_current_span("tool_call") as span:
+        result = call_external_api(state["query"])
+        
+        # ✅ CORRECT: Adaptive logging based on size
+        adaptive_log(span, "tool.output", result)
+        
+        return {"tool_result": result}
+```
+
+---
+
+### Large Payload Decision Matrix
+
+| **Payload Size** | **Strategy** | **What to Log** |
+|------------------|--------------|----------------|
+| < 500 bytes | Log directly | Full content as span attribute |
+| 500B - 5KB | Summarize | First 200 chars + size + hash |
+| 5KB - 50KB | Hash + metadata | Hash, size, type, summary |
+| > 50KB | Out-of-band storage | Artifact ID, size, hash |
+
+**Rule of Thumb:** If it doesn't fit in a tweet (280 chars), don't put it in telemetry attributes.
+
+---
+
+### OpenTelemetry Alignment (Vendor-Neutral)
+
+This module's patterns align with **OpenTelemetry Semantic Conventions** for GenAI:
+
+**Standard Attributes (Vendor-Neutral):**
+```python
+# OpenTelemetry GenAI semantic conventions
+span.set_attribute("gen_ai.system", "langgraph")  # Framework
+span.set_attribute("gen_ai.operation.name", "query_routing")  # Node name
+span.set_attribute("gen_ai.request.model", "gpt-4")  # LLM model
+span.set_attribute("gen_ai.usage.input_tokens", 450)  # Token count
+span.set_attribute("gen_ai.usage.output_tokens", 120)
+
+# Agent-specific (custom namespace)
+span.set_attribute("agent.decision.type", "routing")
+span.set_attribute("agent.state.message_count", 5)
+span.set_attribute("agent.memory.episodic_refs", ["ep_123", "ep_456"])
+```
+
+**Why OpenTelemetry?**
+- **Vendor-neutral** → Works with Datadog, New Relic, Honeycomb, Grafana, etc.
+- **Standard protocol** → OTLP (OpenTelemetry Protocol) is widely supported
+- **Ecosystem** → Auto-instrumentation for popular frameworks
+- **Future-proof** → Industry standard, not proprietary
+
+**Implementation Example:**
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+
+# Configure OpenTelemetry (vendor-neutral)
+trace.set_tracer_provider(TracerProvider())
+exporter = OTLPSpanExporter(
+    endpoint="https://your-observability-backend.com:4317",
+    # Works with: Jaeger, Tempo, Datadog, Honeycomb, etc.
+)
+trace.get_tracer_provider().add_span_processor(
+    BatchSpanProcessor(exporter)
+)
+
+tracer = trace.get_tracer(__name__)
+```
+
+**Key Point:** This guide's patterns work with any OpenTelemetry-compatible backend. You're not locked into a specific vendor.
+
+---
+
+### Practical Instrumentation Patterns
+
+#### **Pattern 1: Node-Level Spans**
+
+```python
+def instrumented_node(state: AgentState) -> dict:
+    """Every node gets a span for timing and context"""
+    with tracer.start_as_current_span("node_name") as span:
+        # Set node metadata
+        span.set_attribute("agent.node.type", "decision")
+        span.set_attribute("agent.state.task_id", state["task_id"])
+        
+        # Node logic
+        result = perform_node_logic(state)
+        
+        # Capture outcome
+        span.set_attribute("agent.node.outcome", result.get("status"))
+        
+        return result
+```
+
+#### **Pattern 2: Tool Call Tracing**
+
+```python
+def traced_tool_call(tool_name: str, tool_input: dict) -> dict:
+    """Standard pattern for external tool instrumentation"""
+    with tracer.start_as_current_span(f"tool.{tool_name}") as span:
+        span.set_attribute("agent.tool.name", tool_name)
+        span.set_attribute("agent.tool.input_hash", hash(str(tool_input)))
+        
+        start = time.time()
+        try:
+            result = execute_tool(tool_name, tool_input)
+            span.set_attribute("agent.tool.success", True)
+            return result
+        except Exception as e:
+            span.set_attribute("agent.tool.success", False)
+            span.set_attribute("agent.tool.error", str(e))
+            span.set_status(trace.Status(trace.StatusCode.ERROR))
+            raise
+        finally:
+            span.set_attribute("agent.tool.duration_ms", (time.time() - start) * 1000)
+```
+
+#### **Pattern 3: Decision Trace Events**
+
+```python
+def log_decision(span, decision_type: str, chosen: str, alternatives: list, reason: str):
+    """Reusable decision logging"""
+    span.add_event(
+        "agent_decision",
+        attributes={
+            "decision.type": decision_type,
+            "decision.chosen": chosen,
+            "decision.alternatives": alternatives,
+            "decision.reason": reason,
+            "decision.timestamp": time.time()
+        }
+    )
+
+# Usage
+def routing_node(state: AgentState) -> dict:
+    with tracer.start_as_current_span("query_routing") as span:
+        if should_retrieve(state["query"]):
+            route = "retrieve"
+        else:
+            route = "direct_answer"
+        
+        log_decision(
+            span,
+            decision_type="routing",
+            chosen=route,
+            alternatives=["retrieve", "direct_answer"],
+            reason="query_complexity_threshold"
+        )
+        
+        return {"next_node": route}
+```
+
+---
+
+### Implementation Checklist
+
+Before deploying observability instrumentation:
+
+- [ ] State update taxonomy applied (ephemeral/decision/external/memory)
+- [ ] Telemetry mapping defined (what category → what telemetry form)
+- [ ] No full state dumps in production code
+- [ ] Large payloads handled via hash/summarize/out-of-band/adaptive
+- [ ] OpenTelemetry SDK configured (vendor-neutral)
+- [ ] Semantic conventions followed (gen_ai.* and agent.* namespaces)
+- [ ] Node-level spans implemented for all workflow nodes
+- [ ] Tool calls instrumented with input/output/duration/cost
+- [ ] Decision events logged with reason and alternatives
+- [ ] Memory formation events captured
+- [ ] Retention policies defined per category
+- [ ] Privacy review completed (no PII in spans/logs)
+- [ ] Cost estimated (telemetry volume × retention × backend pricing)
+- [ ] Dashboards/alerts planned for key metrics
+
+---
+
+**Remember:** Observability is about signal, not volume. The four-category taxonomy ensures you capture what matters while ignoring what doesn't. An agent with 10 decision traces and 5 tool call spans is easier to debug than one drowning in 1000 full state dumps.
 
 ⸻
 
