@@ -65,6 +65,7 @@ The AGI Architecture Blueprint, 9-Phase Roadmap, and Systems Diagrams are advanc
 • State Persistence: Checkpoints, Event Logs, and Replay
 • Observability: Mapping State Updates to Telemetry (Without State Dumps)
 • Multi-Agent State Contracts & Handoff Validation
+• State Safety: PII, Retention, and Redaction
 • Tier 0 · Prereqs & Principles
 • Tier 1 · Basic Agent (MVP Chat + Single Tool)
 • Tier 2 · Intermediate Agent (RAG + Tools + Simple Memory)
@@ -3262,6 +3263,640 @@ except ContractViolation as e:
 ---
 
 **Remember:** In multi-agent systems, implicit state assumptions are bugs waiting to happen. Contracts make guarantees explicit, guards enforce them at runtime, and reducers prevent conflicts. An hour spent defining contracts saves days of debugging mysterious handoff failures.
+
+⸻
+
+## State Safety: PII, Retention, and Redaction
+
+**Concept Capsule:**
+Agent state flows through multiple systems — working memory, logs, telemetry, checkpoints, and long-term storage. Each boundary is a potential privacy violation if not carefully managed. This module teaches you to classify sensitive data, apply redaction before persistence, enforce retention limits, and build compliance-ready agent systems from day one.
+
+**Learning Objectives**
+• Define what data is allowed in working state, logs/telemetry, and long-term memory
+• Implement redaction pipelines before persistence and logging
+• Apply retention policies and TTL (time-to-live) for episodic memory
+• Build production-ready state safety controls that satisfy compliance requirements
+• Recognize and prevent common PII leakage patterns
+
+---
+
+### Data Classification: What's Allowed Where
+
+Not all state can go everywhere. Classification determines storage and retention rules.
+
+#### **Classification Levels**
+
+| **Level** | **Definition** | **Examples** | **Restrictions** |
+|-----------|---------------|--------------|------------------|
+| **Public** | Non-sensitive, can be logged/shared | Task IDs, timestamps, node names, routing decisions | None |
+| **Internal** | Business-sensitive but not personal | API keys (hashed), cost metrics, model names, internal IDs | Encrypt at rest, access control |
+| **PII** | Personally identifiable information | Names, emails, phone numbers, addresses, user messages | Redact before logging, encrypt, strict retention |
+| **Sensitive PII** | High-risk personal data | SSN, credit cards, health records, biometrics, passwords | Never log, redact immediately, minimal retention |
+
+---
+
+#### **Working State (Runtime Memory)**
+
+**What's Allowed:**
+- ✅ All data needed for task execution (including PII if necessary)
+- ✅ User messages and conversation history
+- ✅ Retrieved documents with personal info
+- ✅ API keys and credentials (for tool calls)
+- ✅ Intermediate reasoning (ephemeral)
+
+**Why:** Working state must be functional. Agents need access to user data to complete tasks.
+
+**Safety Controls:**
+- Encrypt state at rest (if persisted to disk/database)
+- Use memory-only state when possible (no disk writes)
+- Clear sensitive fields when task completes
+- Apply access controls (who can read state)
+
+**Example:**
+```python
+class WorkingState(TypedDict):
+    # Public
+    task_id: str
+    routing_decision: str
+    
+    # PII (allowed in working state)
+    user_name: str
+    user_email: str
+    messages: list[str]  # May contain personal info
+    
+    # Sensitive (allowed but handle carefully)
+    api_key: str  # Never log, clear after use
+```
+
+**Rule:** Working state can contain PII, but it must be redacted before logging or long-term storage.
+
+---
+
+#### **Logs & Telemetry (Observability Systems)**
+
+**What's Allowed:**
+- ✅ Public metadata (task IDs, timestamps, durations)
+- ✅ Routing decisions and node names
+- ✅ Tool call names (not inputs/outputs with PII)
+- ✅ Error types and counts
+- ✅ Performance metrics
+
+**What's FORBIDDEN:**
+- ❌ User messages verbatim (unless redacted)
+- ❌ Email addresses, phone numbers
+- ❌ API keys or credentials
+- ❌ Retrieved documents with personal info
+- ❌ Full state dumps
+
+**Why:** Logs are often stored long-term, shared across teams, and sent to third-party observability vendors (Datadog, New Relic, etc.). PII in logs creates compliance risks (GDPR, CCPA, HIPAA violations).
+
+**Safety Controls:**
+- Redact PII before logging (see redaction section below)
+- Hash or truncate user identifiers
+- Use aggregate metrics instead of individual data points
+- Set short retention for detailed logs (7-30 days)
+- Separate PII-containing logs from general telemetry
+
+**Example (Safe Logging):**
+```python
+import hashlib
+
+def log_message_event(message: str, user_id: str):
+    # ❌ WRONG: Log full message
+    # logger.info(f"User message: {message}")
+    
+    # ✅ CORRECT: Log metadata only
+    logger.info(
+        "message_received",
+        extra={
+            "user_id_hash": hashlib.sha256(user_id.encode()).hexdigest()[:16],
+            "message_length": len(message),
+            "message_word_count": len(message.split()),
+            "contains_question": "?" in message,
+        }
+    )
+```
+
+**Rule:** Logs should enable debugging without exposing PII. Use hashes, counts, and flags instead of raw data.
+
+---
+
+#### **Long-Term Memory (Episodic/Semantic Storage)**
+
+**What's Allowed:**
+- ✅ Anonymized user preferences ("user prefers concise answers")
+- ✅ Aggregated patterns ("users in timezone X ask about Y")
+- ✅ De-identified learnings ("strategy Z works well for problem class W")
+- ⚠️ Pseudonymized episodes (user_id → hashed_id, with separate mapping)
+
+**What's FORBIDDEN:**
+- ❌ Raw PII without anonymization
+- ❌ Identifiable conversation transcripts
+- ❌ Data exceeding retention policy (GDPR: 30-90 days default)
+
+**Why:** Long-term memory persists indefinitely. Storing raw PII creates legal liability and "right to be forgotten" compliance burdens.
+
+**Safety Controls:**
+- Apply anonymization or pseudonymization before storage
+- Implement TTL (time-to-live) for episodic memories
+- Store consent records ("user agreed to memory storage")
+- Build "forget" API for GDPR erasure requests
+- Encrypt memory store at rest
+
+**Example (Safe Memory Storage):**
+```python
+def store_user_preference(user_id: str, preference: str, consent: bool):
+    if not consent:
+        # Don't store if user didn't consent
+        return
+    
+    # ✅ CORRECT: Pseudonymize user ID
+    hashed_user_id = hash_user_id(user_id)  # One-way hash
+    
+    memory_store.insert({
+        "user_id_hash": hashed_user_id,  # Not reversible
+        "preference_category": "response_style",
+        "preference_value": "concise",  # Generalized, not verbatim
+        "learned_at": datetime.now(),
+        "ttl": datetime.now() + timedelta(days=90),  # Auto-delete after 90 days
+        "consent_given": True
+    })
+```
+
+**Rule:** Long-term memory should be anonymized, aggregated, and time-limited.
+
+---
+
+### Data Flow Classification Matrix
+
+| **Data Type** | **Working State** | **Logs/Telemetry** | **Long-Term Memory** |
+|---------------|-------------------|--------------------|---------------------|
+| Task ID | ✅ Allowed | ✅ Allowed | ✅ Allowed |
+| Node names, routing | ✅ Allowed | ✅ Allowed | ✅ Allowed |
+| User messages | ✅ Allowed | ❌ Redact first | ❌ Anonymize first |
+| User name/email | ✅ Allowed | ❌ Never log | ❌ Hash/pseudonymize |
+| Phone/address | ✅ Allowed | ❌ Never log | ❌ Never store |
+| API keys | ✅ Allowed | ❌ Never log | ❌ Never store |
+| Error messages | ✅ Allowed | ⚠️ Sanitize | ❌ Exclude PII |
+| Tool outputs | ✅ Allowed | ⚠️ Hash/summarize | ⚠️ Depends on content |
+| Reasoning traces | ✅ Allowed | ⚠️ Debug only, short TTL | ❌ Too noisy |
+
+**Legend:**
+- ✅ Allowed — No restrictions
+- ⚠️ Conditional — Requires redaction or special handling
+- ❌ Forbidden — Do not store in this location
+
+---
+
+### Redaction Pipeline: Before Persistence & Logging
+
+Redaction transforms sensitive data before it leaves working memory.
+
+#### **When to Apply Redaction**
+
+```
+Working State (PII present)
+      │
+      ├─────────────────┐
+      │                 │
+      ▼                 ▼
+   Logging          Checkpointing
+      │                 │
+      │                 │
+ [REDACT]          [REDACT]
+      │                 │
+      ▼                 ▼
+  Log Storage    Checkpoint DB
+ (PII removed)   (PII redacted)
+```
+
+**Critical Points for Redaction:**
+1. Before writing to logs/telemetry
+2. Before persisting checkpoints
+3. Before writing to long-term memory
+4. Before sending to third-party APIs (observability vendors)
+
+---
+
+#### **Redaction Strategies**
+
+**Strategy 1: Pattern-Based Redaction (Regex)**
+
+```python
+import re
+
+REDACTION_PATTERNS = [
+    (r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[EMAIL]'),  # Email
+    (r'\b\d{3}-\d{2}-\d{4}\b', '[SSN]'),  # SSN
+    (r'\b\d{3}-\d{3}-\d{4}\b', '[PHONE]'),  # Phone
+    (r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b', '[CREDIT_CARD]'),  # Credit card
+    (r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', '[IP_ADDRESS]'),  # IP address
+]
+
+def redact_text(text: str) -> str:
+    """Apply pattern-based redaction to text"""
+    redacted = text
+    for pattern, replacement in REDACTION_PATTERNS:
+        redacted = re.sub(pattern, replacement, redacted)
+    return redacted
+
+# Example
+original = "Contact me at john@example.com or 555-123-4567"
+redacted = redact_text(original)
+# Result: "Contact me at [EMAIL] or [PHONE]"
+```
+
+---
+
+**Strategy 2: Named Entity Recognition (NER)**
+
+```python
+import spacy
+
+nlp = spacy.load("en_core_web_sm")
+
+def redact_entities(text: str, entity_types: list[str]) -> str:
+    """
+    Use NER to redact specific entity types.
+    entity_types: ['PERSON', 'ORG', 'GPE', 'DATE', 'MONEY', etc.]
+    """
+    doc = nlp(text)
+    redacted = text
+    
+    # Sort entities by position (reverse to avoid offset issues)
+    entities = sorted(doc.ents, key=lambda e: e.start_char, reverse=True)
+    
+    for ent in entities:
+        if ent.label_ in entity_types:
+            # Replace entity with label
+            redacted = (
+                redacted[:ent.start_char] + 
+                f"[{ent.label_}]" + 
+                redacted[ent.end_char:]
+            )
+    
+    return redacted
+
+# Example
+text = "John Smith from Microsoft contacted me on January 15th."
+redacted = redact_entities(text, ['PERSON', 'ORG', 'DATE'])
+# Result: "[PERSON] from [ORG] contacted me on [DATE]."
+```
+
+---
+
+**Strategy 3: Presidio (Microsoft's PII Detection)**
+
+```python
+from presidio_analyzer import AnalyzerEngine
+from presidio_anonymizer import AnonymizerEngine
+
+analyzer = AnalyzerEngine()
+anonymizer = AnonymizerEngine()
+
+def redact_pii_presidio(text: str) -> str:
+    """Use Presidio for enterprise-grade PII detection"""
+    # Analyze text for PII
+    results = analyzer.analyze(
+        text=text,
+        language="en",
+        entities=["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", 
+                  "CREDIT_CARD", "US_SSN", "LOCATION"]
+    )
+    
+    # Anonymize detected PII
+    anonymized = anonymizer.anonymize(
+        text=text,
+        analyzer_results=results
+    )
+    
+    return anonymized.text
+
+# Example
+text = "My SSN is 123-45-6789 and I live in New York."
+redacted = redact_pii_presidio(text)
+# Result: "My SSN is [US_SSN] and I live in [LOCATION]."
+```
+
+**Recommendation:** Use Presidio for production systems (better accuracy than regex).
+
+---
+
+**Strategy 4: Hashing (For Pseudonymization)**
+
+```python
+import hashlib
+import hmac
+
+# Secret key for HMAC (store securely, not in code)
+HMAC_SECRET = os.environ.get("REDACTION_HMAC_SECRET")
+
+def pseudonymize(value: str, salt: str = "") -> str:
+    """
+    One-way hash with HMAC for consistent pseudonyms.
+    Same input always produces same hash (allows linking without revealing identity).
+    """
+    return hmac.new(
+        HMAC_SECRET.encode(),
+        (value + salt).encode(),
+        hashlib.sha256
+    ).hexdigest()[:16]
+
+# Example
+user_email = "alice@example.com"
+pseudo_id = pseudonymize(user_email)
+# Result: "a3f8e9b2c1d4567f" (deterministic, not reversible)
+```
+
+---
+
+#### **Redaction Integration Points**
+
+**Point 1: Before Logging**
+```python
+def safe_log_message(message: str, level: str = "info"):
+    """Log with automatic PII redaction"""
+    redacted_message = redact_pii_presidio(message)
+    
+    if level == "info":
+        logger.info(redacted_message)
+    elif level == "error":
+        logger.error(redacted_message)
+```
+
+**Point 2: Before Checkpointing**
+```python
+def checkpoint_state(state: dict) -> str:
+    """Save checkpoint with PII redaction"""
+    # Clone state to avoid mutating original
+    redacted_state = state.copy()
+    
+    # Redact specific fields
+    if "messages" in redacted_state:
+        redacted_state["messages"] = [
+            redact_pii_presidio(msg) for msg in redacted_state["messages"]
+        ]
+    
+    if "user_email" in redacted_state:
+        redacted_state["user_email"] = pseudonymize(redacted_state["user_email"])
+    
+    # Save redacted state
+    checkpoint_id = save_to_db(redacted_state)
+    return checkpoint_id
+```
+
+**Point 3: Custom Telemetry Exporter**
+```python
+from opentelemetry.sdk.trace.export import SpanExporter
+
+class RedactingSpanExporter(SpanExporter):
+    """OpenTelemetry exporter with automatic PII redaction"""
+    
+    def __init__(self, delegate_exporter: SpanExporter):
+        self.delegate = delegate_exporter
+    
+    def export(self, spans):
+        # Redact PII from span attributes before export
+        for span in spans:
+            for key, value in span.attributes.items():
+                if isinstance(value, str):
+                    span.attributes[key] = redact_pii_presidio(value)
+        
+        return self.delegate.export(spans)
+```
+
+---
+
+### Retention & TTL for Episodic Memory
+
+Episodic memory grows unbounded without retention limits. Apply TTL (time-to-live) to comply with data protection regulations.
+
+#### **Retention Policy Framework**
+
+```python
+from datetime import datetime, timedelta
+from enum import Enum
+
+class DataCategory(Enum):
+    PUBLIC = "public"              # No restrictions
+    INTERNAL = "internal"          # Business data
+    PII = "pii"                    # Personal data
+    SENSITIVE_PII = "sensitive_pii"  # High-risk data
+
+RETENTION_POLICIES = {
+    DataCategory.PUBLIC: timedelta(days=365),      # 1 year
+    DataCategory.INTERNAL: timedelta(days=180),    # 6 months
+    DataCategory.PII: timedelta(days=90),          # 90 days (GDPR default)
+    DataCategory.SENSITIVE_PII: timedelta(days=30) # 30 days (minimize risk)
+}
+
+class EpisodicMemory(TypedDict):
+    memory_id: str
+    content: str
+    category: DataCategory
+    created_at: datetime
+    ttl: datetime  # Auto-calculated from category
+    consent_given: bool
+```
+
+#### **TTL Calculation**
+
+```python
+def create_memory(content: str, category: DataCategory, consent: bool = False) -> dict:
+    """Create memory with automatic TTL based on category"""
+    now = datetime.now()
+    retention_period = RETENTION_POLICIES[category]
+    
+    memory = {
+        "memory_id": str(uuid.uuid4()),
+        "content": content,
+        "category": category.value,
+        "created_at": now,
+        "ttl": now + retention_period,
+        "consent_given": consent
+    }
+    
+    # Don't store sensitive PII without explicit consent
+    if category == DataCategory.SENSITIVE_PII and not consent:
+        raise ValueError("Cannot store sensitive PII without user consent")
+    
+    return memory
+```
+
+#### **Automated Cleanup Job**
+
+```python
+def prune_expired_memories():
+    """
+    Background job to delete expired episodic memories.
+    Run daily via cron or scheduler.
+    """
+    now = datetime.now()
+    
+    # Find expired memories
+    expired = memory_store.find({"ttl": {"$lt": now}})
+    
+    deleted_count = 0
+    for memory in expired:
+        # Log deletion for compliance audit trail
+        logger.info(
+            "memory_deleted_ttl_expired",
+            extra={
+                "memory_id": memory["memory_id"],
+                "category": memory["category"],
+                "age_days": (now - memory["created_at"]).days
+            }
+        )
+        
+        memory_store.delete_one({"memory_id": memory["memory_id"]})
+        deleted_count += 1
+    
+    return deleted_count
+```
+
+#### **User-Initiated Deletion ("Right to Be Forgotten")**
+
+```python
+def forget_user(user_id: str) -> dict:
+    """
+    GDPR Article 17: Right to erasure.
+    Delete all data associated with a user.
+    """
+    user_id_hash = pseudonymize(user_id)
+    
+    # Delete from all storage locations
+    results = {
+        "memories_deleted": memory_store.delete_many({"user_id_hash": user_id_hash}).deleted_count,
+        "checkpoints_deleted": checkpoint_store.delete_many({"user_id_hash": user_id_hash}).deleted_count,
+        "logs_purged": request_log_purge(user_id_hash),  # May be async
+    }
+    
+    # Log erasure request for compliance
+    logger.info(
+        "gdpr_erasure_completed",
+        extra={
+            "user_id_hash": user_id_hash,
+            "timestamp": datetime.now().isoformat(),
+            "items_deleted": sum(results.values())
+        }
+    )
+    
+    return results
+```
+
+---
+
+### Production Readiness Checklist
+
+Before deploying agents to production:
+
+#### **Data Classification**
+- [ ] All state fields classified (public, internal, PII, sensitive PII)
+- [ ] Classification documented in state schema
+- [ ] Team trained on what constitutes PII in your domain
+
+#### **Redaction**
+- [ ] Redaction pipeline implemented (regex, NER, or Presidio)
+- [ ] Redaction applied before all logging operations
+- [ ] Redaction applied before checkpoint persistence
+- [ ] Redaction applied before long-term memory writes
+- [ ] Redaction tested with sample PII (email, phone, SSN, etc.)
+- [ ] False positive rate acceptable (not redacting non-PII)
+
+#### **Retention & TTL**
+- [ ] Retention policies defined per data category
+- [ ] TTL automatically set when creating memories
+- [ ] Automated cleanup job scheduled (daily/weekly)
+- [ ] Cleanup job logs deletions for audit trail
+- [ ] "Right to be forgotten" API implemented
+- [ ] Erasure requests logged for compliance
+
+#### **Encryption**
+- [ ] State encrypted at rest (database, checkpoints, memory store)
+- [ ] State encrypted in transit (TLS for all network calls)
+- [ ] API keys stored in secrets manager (not in code/state)
+- [ ] Encryption keys rotated regularly
+
+#### **Access Control**
+- [ ] Role-based access control (RBAC) for state access
+- [ ] Audit logging for who accessed what data
+- [ ] Principle of least privilege (agents only access needed data)
+- [ ] Separate dev/staging/prod environments (no prod PII in dev)
+
+#### **Compliance**
+- [ ] GDPR compliance verified (if serving EU users)
+- [ ] CCPA compliance verified (if serving California users)
+- [ ] HIPAA compliance verified (if handling health data)
+- [ ] Data processing agreements (DPA) with third-party vendors
+- [ ] Privacy policy updated to reflect agent data usage
+- [ ] User consent mechanism for memory storage
+
+#### **Monitoring**
+- [ ] Alerts for PII detection in logs (should be zero)
+- [ ] Metrics on redaction rate (how often redaction triggers)
+- [ ] Monitoring of TTL enforcement (cleanup job success rate)
+- [ ] Audit trail for all data access and deletion
+
+#### **Testing**
+- [ ] Unit tests for redaction functions
+- [ ] Integration tests for end-to-end data flow
+- [ ] Penetration testing for PII leakage
+- [ ] Compliance audit completed
+
+---
+
+### Common PII Leakage Patterns to Avoid
+
+#### **1. Exception Messages in Logs**
+```python
+# ❌ WRONG: Exception may contain PII
+try:
+    process_user_data(user_email, user_phone)
+except Exception as e:
+    logger.error(f"Error: {str(e)}")  # May leak PII from error message
+
+# ✅ CORRECT: Redact exception message
+try:
+    process_user_data(user_email, user_phone)
+except Exception as e:
+    logger.error(f"Error: {redact_pii_presidio(str(e))}")
+```
+
+#### **2. Debug Prints Left in Production**
+```python
+# ❌ WRONG: Debug print with PII
+print(f"Processing user: {user_name}, email: {user_email}")  # Logs to stdout
+
+# ✅ CORRECT: Remove debug prints or use debug-level logging
+logger.debug(f"Processing user_id_hash: {pseudonymize(user_id)}")
+```
+
+#### **3. Full State in Error Handlers**
+```python
+# ❌ WRONG: Dump full state on error
+except Exception:
+    logger.error(f"State dump: {json.dumps(state)}")
+
+# ✅ CORRECT: Log only safe metadata
+except Exception:
+    logger.error(f"Error in task {state['task_id']}, node count: {len(state.get('visited_nodes', []))}")
+```
+
+#### **4. Third-Party Analytics**
+```python
+# ❌ WRONG: Send user messages to analytics
+analytics.track("message_sent", {"message": user_message})
+
+# ✅ CORRECT: Send only metadata
+analytics.track("message_sent", {
+    "message_length": len(user_message),
+    "language": detect_language(user_message)
+})
+```
+
+---
+
+**Remember:** PII violations aren't just bad practice — they're legal liabilities. A single leaked email address can trigger GDPR fines up to €20M or 4% of annual revenue. Build redaction into your data flow from day one, not as an afterthought. The best PII strategy is the one you validate before your first production user.
 
 ⸻
 
