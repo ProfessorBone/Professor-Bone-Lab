@@ -61,6 +61,7 @@ The AGI Architecture Blueprint, 9-Phase Roadmap, and Systems Diagrams are advanc
 • Agent Foundations: From Environment to Architecture
 • The Standard RAG-Agent Build Workflow
 • State Scope & Ownership (Local vs Global State)
+• Memory Lifecycle & Anti-Bloat Patterns
 • Tier 0 · Prereqs & Principles
 • Tier 1 · Basic Agent (MVP Chat + Single Tool)
 • Tier 2 · Intermediate Agent (RAG + Tools + Simple Memory)
@@ -1058,6 +1059,399 @@ Before finalizing your state schema, validate:
 - [ ] Logging strategy is separate from state persistence strategy
 
 **Remember:** State bloat is a leading cause of agent debugging nightmares. When in doubt, keep it local. Promote to broader scope only when coordination demands it.
+
+⸻
+
+## Memory Lifecycle & Anti-Bloat Patterns
+
+**Concept Capsule:**
+Memory systems can make agents smarter — or catastrophically slower if mismanaged. This module teaches you the discipline of when to query long-term memory, when to write, and how to prevent unbounded memory growth through pointer-replace and pruning patterns. Follow these patterns to build agents that learn without drowning in their own history.
+
+**Learning Objectives**
+• Identify the three critical moments to query episodic/procedural memory
+• Distinguish memory-qualifying updates from ephemeral state changes
+• Implement pointer-replace patterns to avoid context bloat
+• Design pruning strategies that preserve learning while controlling growth
+• Build state schemas that separate working sets from memory references
+
+---
+
+### When to Query Memory (Read Operations)
+
+Long-term memory queries are expensive — they add latency, consume tokens, and introduce retrieval noise. Query strategically at these three critical moments:
+
+#### 1. **Before Planning (Context Priming)**
+
+**When:** At the start of a task, before generating the initial plan.
+
+**Why:** Prior experiences and learned procedures can inform better strategies.
+
+**What to Query:**
+- **Episodic Memory:** "Have I seen this type of task before? What worked? What failed?"
+- **Procedural Memory:** "Do I have a saved workflow or template for this?"
+
+**Example:**
+```python
+def planning_node(state: AgentState) -> dict:
+    # Query episodic memory FIRST
+    similar_tasks = episodic_memory.query(
+        state["user_query"], 
+        filters={"outcome": "success"},
+        top_k=3
+    )
+    
+    # Use past successes to inform plan
+    if similar_tasks:
+        context = f"Similar past tasks: {similar_tasks}"
+        plan = llm.generate_plan(state["user_query"], context=context)
+    else:
+        plan = llm.generate_plan(state["user_query"])
+    
+    return {"plan": plan, "episodic_context_ids": [t.id for t in similar_tasks]}
+```
+
+**Anti-Pattern:** Querying memory after already generating the plan (too late to influence strategy).
+
+---
+
+#### 2. **After Failure/Retry (Error Recovery)**
+
+**When:** Immediately after a tool call fails or a validation check fails.
+
+**Why:** Learn from past failures to avoid repeating mistakes.
+
+**What to Query:**
+- **Episodic Memory:** "Have I encountered this error before? What recovery strategy worked?"
+- **Procedural Memory:** "Is there a known workaround for this failure mode?"
+
+**Example:**
+```python
+def handle_tool_failure(state: AgentState, error: Exception) -> dict:
+    # Check if we've seen this error pattern before
+    past_failures = episodic_memory.query(
+        f"error: {type(error).__name__}",
+        filters={"tags": "tool_failure", "resolution": "success"}
+    )
+    
+    if past_failures:
+        # Apply known recovery strategy
+        recovery_action = past_failures[0].metadata["recovery_method"]
+        return {"next_action": recovery_action, "retry_count": state["retry_count"] + 1}
+    else:
+        # No known fix — escalate or fallback
+        return {"next_action": "fallback_strategy", "retry_count": state["retry_count"] + 1}
+```
+
+**Anti-Pattern:** Blindly retrying the same action without consulting memory (no learning).
+
+---
+
+#### 3. **At Phase Transitions (Workflow Checkpoints)**
+
+**When:** When moving between major workflow phases (e.g., Research → Writing, Data Collection → Analysis).
+
+**Why:** Each phase may benefit from phase-specific learned strategies.
+
+**What to Query:**
+- **Procedural Memory:** "What's the optimal sequence of steps for this phase?"
+- **Episodic Memory:** "What quality checks should I apply based on past phase transitions?"
+
+**Example:**
+```python
+def transition_to_writing(state: ResearchState) -> dict:
+    # Query for writing-phase best practices
+    writing_procedures = procedural_memory.query(
+        "writing phase initialization",
+        filters={"phase": "writing", "quality_score": ">0.8"}
+    )
+    
+    if writing_procedures:
+        writing_config = writing_procedures[0].metadata["config"]
+    else:
+        writing_config = DEFAULT_WRITING_CONFIG
+    
+    return {
+        "current_phase": "writing",
+        "phase_config": writing_config,
+        "research_summary": summarize(state["research_findings"])
+    }
+```
+
+**Anti-Pattern:** Treating all phases identically without leveraging phase-specific learning.
+
+---
+
+### When to Write Memory (Write Operations)
+
+Not every state update deserves to become a memory. Follow the **memory-qualifying filter** from the state management taxonomy:
+
+#### ✅ **Write to Memory When:**
+
+1. **User Corrections** → User explicitly corrects the agent's behavior
+   - Example: "No, I prefer summaries without bullet points"
+   - Store as: Semantic memory (preference) or Episodic memory (correction event)
+
+2. **Successful Novel Strategies** → Agent tried something new and it worked
+   - Example: Rewrote query in a new way, got better retrieval results
+   - Store as: Procedural memory (reusable strategy)
+
+3. **Failure Patterns** → Repeated failures with the same root cause
+   - Example: API timeout on requests > 10 items, succeeded after batching
+   - Store as: Episodic memory (failure + resolution)
+
+4. **Task Completion with High Confidence** → End-to-end success worth remembering
+   - Example: User approved final output, low revision count
+   - Store as: Episodic memory (full task trace)
+
+5. **Discovered Facts/Preferences** → New information about the user or domain
+   - Example: Inferred user's timezone, domain-specific terminology
+   - Store as: Semantic memory (facts)
+
+#### ❌ **Do NOT Write to Memory:**
+
+- Intermediate reasoning steps (ephemeral)
+- Routine tool calls that succeeded (low signal)
+- Temporary state variables (scope = node or agent-local)
+- Every single message in a conversation (bloat)
+- Failed attempts that were immediately retried successfully (noise)
+
+**Decision Rule:**
+> If this information would be useful **in a future task** (not just the next node), it's memory-qualifying. Otherwise, it's ephemeral state.
+
+---
+
+### The Memory Lifecycle Flow (LangGraph-Style)
+
+Here's the canonical node sequence for memory-aware agents:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         MEMORY LIFECYCLE                            │
+└─────────────────────────────────────────────────────────────────────┘
+
+   START
+     │
+     ▼
+┌─────────────────┐
+│  MemoryQuery    │  ← Query episodic/procedural for context
+│  (before plan)  │    Return: memory_refs (IDs only, not full docs)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│      Plan       │  ← Generate plan using memory context
+│                 │    (Memory docs injected into context window)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   Act/Tools     │  ← Execute plan steps (tool calls, API requests)
+│                 │    
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│    Observe      │  ← Collect results, validate outputs
+│                 │    Detect: success/failure/partial
+└────────┬────────┘
+         │
+         ▼
+    ┌────────────────────┐
+    │ Memory-Qualifying? │ ← Filter: Does this deserve long-term storage?
+    └────────┬───────────┘
+             │
+       ┌─────┴─────┐
+      YES          NO
+       │            │
+       ▼            ▼
+┌─────────────┐   (Skip to
+│ MemoryCommit│    NextNode)
+│ (write new) │
+└──────┬──────┘
+       │
+       ▼
+┌──────────────────┐
+│ PointerReplace   │ ← Replace full docs with IDs in state
+│ (compress state) │    Keep: [episode_id_123, proc_id_456]
+└────────┬─────────┘    Drop: Full text of episodes
+         │
+         ▼
+┌──────────────────┐
+│      Prune       │ ← Apply retention policy
+│  (limit growth)  │    - Decay old low-value memories
+└────────┬─────────┘    - Deduplicate similar episodes
+         │              - Summarize verbose entries
+         │
+         ▼
+┌──────────────────┐
+│    NextNode      │ ← Continue workflow
+│                  │
+└──────────────────┘
+```
+
+**Key Insights:**
+
+1. **Memory pointers, not full text** — State holds IDs; context window gets full docs on-demand
+2. **Commit happens AFTER observation** — Don't write memories of failed tool calls until you know the outcome
+3. **Prune is a separate node** — Asynchronous cleanup prevents blocking the main workflow
+4. **MemoryQuery is optional** — Not every node needs memory; query only when beneficial
+
+---
+
+### State Schema with Memory Pointers
+
+Here's a practical TypedDict showing working state + memory references:
+
+```python
+from typing import TypedDict, Annotated
+from langgraph.graph import add_messages
+
+class MemoryAwareState(TypedDict):
+    """Agent state with memory pointer pattern"""
+    
+    # Working set (agent-local, task-scoped)
+    messages: Annotated[list, add_messages]
+    current_plan: str
+    tool_outputs: list[dict]
+    retry_count: int
+    
+    # Memory pointers (references, not full content)
+    episodic_refs: list[str]      # IDs of relevant past episodes
+    procedural_refs: list[str]    # IDs of applicable procedures
+    
+    # Prune/summary markers
+    last_prune_timestamp: float   # When we last cleaned up
+    context_summary: str          # Compressed view of messages (optional)
+    
+    # Memory commit queue (pending writes)
+    pending_memories: list[dict]  # Write these at next commit node
+    
+    # Metadata
+    task_id: str
+    outcome: str                  # "success" | "failure" | "in_progress"
+```
+
+**How This Works:**
+
+1. **`episodic_refs`** — Points to past episodes, e.g., `["ep_2024_12_01_abc", "ep_2024_12_15_xyz"]`
+   - At MemoryQuery node: Populate with relevant episode IDs
+   - At context window: Fetch full episode text using IDs
+   - In state: Keep only IDs (low memory footprint)
+
+2. **`procedural_refs`** — Points to saved workflows, e.g., `["proc_research_v2", "proc_writing_template"]`
+   - Store templates, successful step sequences, reusable patterns
+
+3. **`pending_memories`** — Queue for writes
+   - During workflow: Append to queue when memory-qualifying events occur
+   - At MemoryCommit node: Batch-write all pending memories
+   - Prevents blocking the main workflow with DB writes
+
+4. **`last_prune_timestamp`** — Trigger for cleanup
+   - If `current_time - last_prune_timestamp > PRUNE_INTERVAL`, route to Prune node
+
+5. **`context_summary`** — Optional compression
+   - Summarize long message histories into a brief string
+   - Use summary instead of full messages when context window is tight
+
+**Anti-Pattern Example (What NOT to Do):**
+```python
+# ❌ BAD: Storing full episode objects in state
+class BadState(TypedDict):
+    episodic_memories: list[EpisodeObject]  # Each episode = 2KB → bloat!
+    
+# ✅ GOOD: Storing pointers
+class GoodState(TypedDict):
+    episodic_refs: list[str]  # Each ID = 20 bytes → lean!
+```
+
+---
+
+### Anti-Bloat Checklist
+
+Before deploying your memory-enabled agent, validate:
+
+#### Memory Query Discipline
+- [ ] Memory queries happen at the 3 critical moments (before plan, after failure, at phase transitions)
+- [ ] Memory queries are NOT in every node (prevent over-querying)
+- [ ] Query results are filtered by relevance/recency before injection into context window
+- [ ] Failed queries have graceful fallbacks (don't block workflow)
+
+#### Memory Write Discipline
+- [ ] Only memory-qualifying events trigger writes (use the 5-criteria filter)
+- [ ] Writes happen asynchronously or batched (don't block reasoning loop)
+- [ ] Each memory has metadata (timestamp, tags, confidence, source_task_id)
+- [ ] Duplicate detection prevents storing near-identical episodes
+
+#### Pointer-Replace Pattern
+- [ ] State schema uses IDs/references, not full memory objects
+- [ ] Full memory content fetched on-demand at context window assembly time
+- [ ] State serialization size is bounded (not proportional to # of memories)
+- [ ] Memory pointers are validated (ensure IDs exist before dereferencing)
+
+#### Pruning Strategy
+- [ ] Retention policy is explicit (e.g., "keep last 100 episodes, decay >30 days old")
+- [ ] Low-value memories are pruned (e.g., routine successes, redundant episodes)
+- [ ] Pruning runs periodically, not on every task (async job or threshold-triggered)
+- [ ] Summarization is used for verbose memories (compress before storing)
+- [ ] Deduplication merges similar episodes (cluster embeddings, merge duplicates)
+
+#### Context Window Management
+- [ ] Total context size (messages + memory + tools) stays under model limit
+- [ ] If context exceeds limit, summarize messages or limit memory injection
+- [ ] Memory docs are ranked by relevance before injection (top-k only)
+
+#### Debugging & Observability
+- [ ] Memory query/write events are logged (which memories were accessed/created)
+- [ ] Prune operations are logged (what was removed, why)
+- [ ] State size is monitored (alert if state grows unbounded)
+
+---
+
+### Practical Implementation Tips
+
+**Tip 1: Use a Memory Manager Abstraction**
+```python
+class MemoryManager:
+    def query(self, query: str, memory_type: str, top_k: int = 3) -> list[str]:
+        """Returns memory IDs, not full objects"""
+        pass
+    
+    def fetch(self, memory_ids: list[str]) -> list[dict]:
+        """Hydrates IDs into full memory objects for context window"""
+        pass
+    
+    def commit(self, memories: list[dict]) -> list[str]:
+        """Writes memories, returns assigned IDs"""
+        pass
+    
+    def prune(self, policy: dict) -> int:
+        """Removes memories per policy, returns count deleted"""
+        pass
+```
+
+**Tip 2: Prune Node as Conditional Edge**
+```python
+def should_prune(state: MemoryAwareState) -> str:
+    if time.time() - state["last_prune_timestamp"] > PRUNE_INTERVAL:
+        return "prune"
+    else:
+        return "next_node"
+
+# In graph definition
+graph.add_conditional_edges("observe", should_prune, {
+    "prune": "prune_node",
+    "next_node": "next_action"
+})
+```
+
+**Tip 3: Separate Memory Commit from Critical Path**
+- Make MemoryCommit node async or fire-and-forget
+- Don't wait for DB write confirmation before proceeding
+- Use a write queue that drains in the background
+
+---
+
+**Remember:** Memory is a force multiplier for agents — but only when managed with discipline. Query sparingly, write selectively, compress aggressively, and prune ruthlessly. An agent with 10 well-chosen memories outperforms one drowning in 10,000 unfiltered episodes.
 
 ⸻
 
