@@ -3900,6 +3900,273 @@ analytics.track("message_sent", {
 
 ⸻
 
+## State Anti-Patterns (Avoid These)
+
+**⚠️ Critical: These patterns destroy state hygiene and cause production failures.**
+
+The following practices are **forbidden** in well-architected agent systems:
+
+### ❌ **Treating State as a Log**
+**What it looks like:** Appending every intermediate decision, thought, or calculation to state fields like `reasoning_trace`, `debug_history`, or `execution_log`.
+
+**Why it fails:**
+- State grows unbounded (100KB+ per task)
+- Serialization/deserialization overhead kills performance
+- Debugging becomes harder (signal lost in noise)
+
+**The fix:** Logs are separate from state. Use telemetry for observability, not state fields.
+
+---
+
+### ❌ **Treating State as an Archive**
+**What it looks like:** Keeping all retrieved documents, all API responses, all previous drafts in state "just in case."
+
+**Why it fails:**
+- Memory bloat (context windows overflow)
+- Stale data pollutes reasoning (agent uses old context)
+- Checkpoints become massive (storage costs explode)
+
+**The fix:** State holds only **current working data**. Archive to external storage (S3, database) if needed for audit, reference by pointer.
+
+---
+
+### ❌ **Storing Full Tool Payloads Inline**
+**What it looks like:** `state["api_response"] = 50KB_json_blob`
+
+**Why it fails:**
+- Single tool call bloats state to hundreds of KB
+- Slows down every subsequent state read/write
+- Wastes bandwidth in distributed systems
+
+**The fix:** Store summary or pointer: `state["api_response_summary"] = "200 items retrieved"` + `state["response_artifact_id"] = "s3://bucket/response.json"`
+
+---
+
+### ❌ **Appending Memory Retrievals Without Pruning**
+**What it looks like:** Every time you query episodic memory, append results to `state["episodic_context"]` without ever removing old retrievals.
+
+**Why it fails:**
+- Context accumulates across steps (Step 1: 3 memories, Step 10: 30 memories)
+- Irrelevant memories from early steps pollute later reasoning
+- Token budgets exceeded (LLM context window overflow)
+
+**The fix:** Replace, don't append. Or use a fixed-size buffer: `state["episodic_context"] = latest_memories[-5:]` (keep only 5 most recent).
+
+---
+
+### ❌ **Using a Single Shared Dict Across Multiple Agents**
+**What it looks like:** All agents read/write to `global_state = {}` without scoping or ownership rules.
+
+**Why it fails:**
+- Race conditions (Agent A overwrites Agent B's data)
+- No clear ownership (who's responsible for `draft_report`?)
+- Debugging nightmares (which agent corrupted this field?)
+
+**The fix:** Use explicit contracts (see Multi-Agent State Contracts module). Scope state: agent-local fields vs shared coordination fields.
+
+---
+
+### ❌ **Letting State Grow Monotonically Across Steps**
+**What it looks like:** State size at Step 1: 5KB → Step 10: 50KB → Step 50: 500KB, with no cleanup.
+
+**Why it fails:**
+- Performance degrades over time (each step slower than the last)
+- Eventual crashes when state exceeds size limits
+- Impossible to checkpoint (database row size limits)
+
+**The fix:**
+- **Prune aggressively:** Remove fields no longer needed after each phase
+- **Pointer-replace:** Swap full objects for IDs/references
+- **Summarize:** Compress verbose fields (`messages[:20]` → `context_summary`)
+
+---
+
+### **Why These Patterns Are Toxic**
+
+They lead to:
+1. **State bloat** → Performance death spiral (every operation gets slower)
+2. **Hidden coupling** → Changes to one field unexpectedly break another agent
+3. **Brittle multi-agent failures** → Race conditions, lost updates, corrupted handoffs
+
+**Golden Rule:** If a state field isn't actively used in the next 2-3 nodes, it doesn't belong in state. Archive it, log it, or delete it.
+
+⸻
+
+## End-of-Task Teardown (Lifecycle Closure)
+
+**Formal Rule: State is Ephemeral by Default**
+
+> **At task completion, only memory-qualifying artifacts may persist beyond the task boundary.**
+> 
+> All working state — local (node-scoped), agent-local, and shared/global — is **discarded** or **checkpointed solely for replay/debugging purposes**, not for production use.
+
+### What Happens at Task Completion
+
+```
+Task Starts
+    ↓
+Working State Created (ephemeral)
+    ↓
+[Execution: nodes, tools, reasoning]
+    ↓
+Task Completes ✅
+    ↓
+┌─────────────────────────────────────────┐
+│  STATE TEARDOWN SEQUENCE                │
+├─────────────────────────────────────────┤
+│                                         │
+│  1. Extract Memory-Qualifying Artifacts │
+│     → User preferences                  │
+│     → Successful strategies             │
+│     → Error patterns + resolutions      │
+│     → Approved outputs                  │
+│                                         │
+│  2. Write to Long-Term Memory           │
+│     → Episodic store (with TTL)         │
+│     → Semantic store (anonymized)       │
+│     → Procedural store (reusable logic) │
+│                                         │
+│  3. Emit Final Telemetry                │
+│     → Task completion event             │
+│     → Success/failure status            │
+│     → Duration, cost, resource usage    │
+│     → Decision trace summary            │
+│                                         │
+│  4. Checkpoint (Optional)               │
+│     → Save state snapshot for replay    │
+│     → Used for debugging, not runtime   │
+│     → Subject to retention policy       │
+│                                         │
+│  5. Discard Working State               │
+│     → Clear all ephemeral fields        │
+│     → Release memory                    │
+│     → Close database connections        │
+│     → Delete temp files                 │
+│                                         │
+└─────────────────────────────────────────┘
+    ↓
+Task Ends (state freed)
+```
+
+### Key Principles
+
+#### 1. **Telemetry is Append-Only and External**
+- Logs, traces, and metrics are written to **external observability systems** (Datadog, Grafana, etc.)
+- They are **never stored in agent state**
+- They persist according to their own retention policies (independent of state lifecycle)
+
+**Example:**
+```python
+def complete_task(state: dict):
+    # ✅ CORRECT: Emit telemetry, don't store in state
+    emit_metric("task.duration_ms", state["end_time"] - state["start_time"])
+    emit_event("task_completed", {"task_id": state["task_id"], "status": "success"})
+    
+    # ❌ WRONG: Don't save telemetry to state
+    # state["telemetry_events"] = all_events  # NO!
+```
+
+---
+
+#### 2. **Memory Promotion is the Only Path to Persistence**
+- If data should outlive the task, it must pass through **memory-qualifying filters**
+- Only explicitly promoted artifacts persist
+- Everything else is garbage-collected
+
+**Decision Tree:**
+```
+Should this data persist beyond task completion?
+    ↓
+   NO → Discard (working state is ephemeral)
+    ↓
+   YES → Is it memory-qualifying?
+         ↓
+        NO → Checkpoint for debug only (short retention)
+         ↓
+        YES → Promote to long-term memory (with TTL, anonymization)
+```
+
+**Example:**
+```python
+def teardown_task(state: dict):
+    # Extract memory-qualifying artifacts
+    if state.get("user_corrected_agent"):
+        # ✅ Promote to memory
+        memory_store.insert({
+            "type": "user_correction",
+            "content": state["correction_text"],
+            "ttl": datetime.now() + timedelta(days=90)
+        })
+    
+    # Checkpoint for replay (debugging only)
+    checkpoint_store.save(state, retention_days=30)
+    
+    # ✅ Discard working state
+    state.clear()  # Free memory
+```
+
+---
+
+#### 3. **State Cleanup is Non-Negotiable**
+Even if your framework auto-manages state, explicitly clear sensitive fields:
+
+```python
+def cleanup_state(state: dict):
+    """Explicit teardown before task end"""
+    # Clear sensitive data
+    state.pop("api_key", None)
+    state.pop("user_email", None)
+    state.pop("raw_messages", None)
+    
+    # Clear large payloads
+    state.pop("retrieved_docs", None)
+    state.pop("tool_responses", None)
+    
+    # Keep only final output
+    final_output = state.get("final_answer")
+    
+    # Optionally: clear everything except final output
+    state.clear()
+    state["final_answer"] = final_output
+    state["task_completed"] = True
+```
+
+---
+
+### Why This Matters
+
+**Without teardown:**
+- Memory leaks in long-running agents
+- PII persists longer than legally allowed
+- State accumulates across tasks (if agent is reused)
+- Costs balloon (checkpoint storage grows unbounded)
+
+**With teardown:**
+- Clean slate for each new task
+- Compliance with retention policies
+- Predictable resource usage
+- Clear separation: working state vs durable memory
+
+---
+
+### Implementation Checklist
+
+Before deploying, verify:
+- [ ] Task completion triggers explicit teardown logic
+- [ ] Memory-qualifying artifacts extracted and promoted
+- [ ] Telemetry emitted (not stored in state)
+- [ ] Optional checkpoint saved (debug/replay only)
+- [ ] Sensitive fields cleared (API keys, PII)
+- [ ] Large payloads discarded (not checkpointed)
+- [ ] Working state freed or reset
+- [ ] Teardown tested (no memory leaks in multi-task runs)
+
+---
+
+**Remember:** State is a tool for the current task, not a database. Treat it like RAM, not a hard drive. When the task ends, state should disappear — only lessons learned (memories) and execution traces (telemetry) persist. An agent that properly tears down state is an agent that scales.
+
+⸻
+
 ## Tier 0 · Prereqs & Principles
 
 **Concept Capsule:**
