@@ -280,6 +280,175 @@ It is intentionally framework-agnostic.
 
 ⸻
 
+### When does the agent query episodic + procedural memory?
+
+Think of memory retrieval as an **internal tool call** that should happen at **decision points**, not continuously.
+
+The most common (and reliable) retrieval moments are:
+
+1. **Task start (bootstrap retrieval)**
+
+* Right after you parse the user goal / task objective, before you plan.
+* **Episodic:** "Have I solved something like this before? What worked/failed?"
+* **Procedural:** "Do I have a known playbook/workflow for this task type?"
+
+2. **Before planning a step (pre-action retrieval)**
+
+* Each time you're about to choose the next tool/step.
+* **Procedural dominates** here: grab the best-known procedure/checklist for the step you're entering.
+
+3. **When uncertainty is high**
+
+* Triggers: low confidence, missing requirements, ambiguous user intent, conflicting signals.
+* **Episodic** can provide "similar past cases" that reduce ambiguity (what questions to ask, what assumptions were wrong last time).
+
+4. **After a failure / exception (recovery retrieval)**
+
+* Tool fails, validation fails, output rejected, or you hit a retry condition.
+* **Episodic:** "Last time this API failed, what fallback worked?"
+* **Procedural:** "What's the standard retry/backoff/alternative path?"
+
+5. **When a phase changes**
+
+* Example: research → drafting → review.
+* Pull phase-specific procedures (procedural) and relevant prior outcomes (episodic).
+
+Rule of thumb:
+
+* **Procedural retrieval = "how to do it"** (playbooks, best practices, checklists).
+* **Episodic retrieval = "what happened before"** (cases, outcomes, gotchas, user preferences learned in context).
+
+---
+
+## Concrete "memory write → pointer replace → prune" flow (LangGraph-style) + where query fits
+
+### Tiny state schema (TypedDict)
+
+```python
+from typing import TypedDict, Optional, List, Literal, Dict, Any
+
+class AgentState(TypedDict, total=False):
+    goal: str
+    phase: Literal["bootstrap", "plan", "act", "reflect", "final"]
+
+    # Working set (can bloat if you don't prune)
+    working_notes: str
+    tool_payload: Dict[str, Any]          # potentially large
+    draft_output: str
+
+    # Memory retrieval results (keep small)
+    retrieved_procedures: List[Dict[str, Any]]  # summaries/IDs, not full docs
+    retrieved_episodes: List[Dict[str, Any]]    # summaries/IDs, not full docs
+
+    # Memory pointers (after commit)
+    episodic_memory_ids: List[str]
+    procedural_memory_ids: List[str]
+
+    # Telemetry-friendly
+    last_decision: str
+    confidence: float
+```
+
+### Node sequence (high level)
+
+Here's a clean pattern that keeps state lean:
+
+1. **ingest_goal**
+2. **memory_query_bootstrap**  ← (query point)
+3. **plan_next_step**
+4. **act_tool_call**
+5. **reflect_and_classify_update**
+6. **memory_commit_if_qualifying**  ← (write)
+7. **pointer_replace**             ← (replace payload with IDs + summaries)
+8. **prune_state**                 ← (evict large fields)
+9. loop back to **memory_query_pre_action** when needed  ← (query point)
+10. **finalize**
+
+### Pseudocode for the key nodes
+
+#### (A) Memory query nodes (episodic + procedural)
+
+```python
+def memory_query_bootstrap(state: AgentState) -> AgentState:
+    # INTERNAL TOOL CALLS (conceptually)
+    # procedural: get best playbook(s) for this goal/phase
+    state["retrieved_procedures"] = [
+        {"id": "proc_123", "summary": "Use workflow: parse→plan→tool→validate→summarize", "score": 0.82}
+    ]
+    # episodic: get similar past task experiences
+    state["retrieved_episodes"] = [
+        {"id": "epi_998", "summary": "Similar task: tool X failed; fallback to Y worked", "score": 0.71}
+    ]
+    return state
+
+
+def memory_query_pre_action(state: AgentState) -> AgentState:
+    # Trigger this selectively: low confidence, phase change, or failure
+    if state.get("confidence", 1.0) < 0.7 or state.get("last_decision") == "retry":
+        # fetch targeted items, keep them small (summaries + IDs)
+        state["retrieved_episodes"] = [{"id": "epi_771", "summary": "Ask for missing constraint Z first", "score": 0.76}]
+    return state
+```
+
+#### (B) Memory commit node (write long-term, then shrink working set)
+
+```python
+def memory_commit_if_qualifying(state: AgentState) -> AgentState:
+    # Example classification output from reflect step:
+    # state["tool_payload"] might be huge; only some parts qualify for memory
+
+    # Suppose we decide this is episodic:
+    new_epi_id = "epi_new_001"  # returned by your memory store
+    state.setdefault("episodic_memory_ids", []).append(new_epi_id)
+
+    # Suppose we also learned a procedure:
+    new_proc_id = "proc_new_010"
+    state.setdefault("procedural_memory_ids", []).append(new_proc_id)
+
+    return state
+```
+
+#### (C) Pointer replace + prune (anti-bloat)
+
+```python
+def pointer_replace(state: AgentState) -> AgentState:
+    # Replace heavy payloads with compact references
+    if "tool_payload" in state:
+        state["tool_payload"] = {
+            "stored": True,
+            "ref": "blob_555",  # e.g., object storage key
+            "summary": "Tool returned 42 records; top 3 relevant saved."
+        }
+    return state
+
+
+def prune_state(state: AgentState) -> AgentState:
+    # Hard eviction: remove anything not needed for next decision cycle
+    # Keep goal, phase, confidence, memory pointers, and small retrieval summaries.
+    for k in ["working_notes", "draft_output"]:
+        if k in state and len(state[k]) > 2000:
+            state[k] = state[k][:500] + " ...[truncated]"
+    # Optionally remove large fields entirely once committed
+    # del state["tool_payload"]  # if you truly don't need it anymore
+    return state
+```
+
+---
+
+## Where the query "fits" in the loop (simple rule)
+
+* **Always query at bootstrap.**
+* Then query again only on triggers:
+
+  * **phase change**
+  * **confidence < threshold**
+  * **error/retry**
+  * **before a high-cost tool call**
+
+That gives you the benefits of memory without turning state into a junk drawer.
+
+⸻
+
 ## Next Natural Extensions (Optional)
 
 Future notes can build on this by covering:
