@@ -58,6 +58,9 @@ The AGI Architecture Blueprint, 9-Phase Roadmap, and Systems Diagrams are advanc
 ⸻
 
 ## Table of Contents
+• Agent Foundations: From Environment to Architecture
+• The Standard RAG-Agent Build Workflow
+• State Scope & Ownership (Local vs Global State)
 • Tier 0 · Prereqs & Principles
 • Tier 1 · Basic Agent (MVP Chat + Single Tool)
 • Tier 2 · Intermediate Agent (RAG + Tools + Simple Memory)
@@ -764,6 +767,297 @@ Now that you understand schemas and the build workflow, let's see how memory flo
 - Phase 2 defines State schema (working memory structure)
 - Phase 3 orchestrates how State flows between nodes
 - Phase 4 creates EM (logs of execution for future learning)
+
+⸻
+
+## State Scope & Ownership (Local vs Global State)
+
+**Concept Capsule:**
+Not all state is created equal. Understanding the difference between node-local scratch space, agent-local working state, and shared coordination state is critical to preventing state bloat, ownership conflicts, and debugging nightmares. This module provides a systematic framework for deciding what belongs where — and what should never be in state at all.
+
+**Learning Objectives**
+• Distinguish between local/node scratch, agent-local working set, and shared/global coordination state
+• Design state schemas that prevent bloat and ownership conflicts
+• Apply scope and lifetime rules to single-agent and multi-agent architectures
+• Recognize and avoid common anti-patterns in state management
+
+---
+
+### Defining the Three Scopes of State
+
+In agentic systems, state exists at three distinct scopes, each with different ownership models, lifetimes, and responsibilities:
+
+#### 1. **Node Scratch (Local/Ephemeral)**
+
+**Definition:** Temporary working space that exists only during a single node's execution. Dies when the node completes.
+
+**Characteristics:**
+- **Lifetime:** Single node execution (milliseconds to seconds)
+- **Ownership:** The executing node exclusively
+- **Visibility:** Hidden from other nodes and agents
+- **Purpose:** Enable internal calculations without polluting shared state
+
+**What Belongs Here:**
+- Intermediate computation results
+- Temporary parsing buffers
+- Draft outputs before validation
+- Retry counters for the current operation
+- API response preprocessing
+
+**Examples:**
+```python
+# Node scratch — never appears in State schema
+def query_router_node(state: MessagesState) -> dict:
+    # Local scratch variables
+    query_length = len(state["messages"][-1].content)
+    has_numbers = any(c.isdigit() for c in state["messages"][-1].content)
+    
+    # Decision based on scratch calculations
+    if query_length > 100 and has_numbers:
+        route = "detailed_retrieval"
+    else:
+        route = "quick_lookup"
+    
+    # Only the decision enters state
+    return {"routing_decision": route}
+```
+
+**Key Rule:** If no other node needs it, keep it local. Don't promote scratch variables to state.
+
+---
+
+#### 2. **Agent-Local State (Working Set)**
+
+**Definition:** The agent's working memory for the current task. Persists across nodes within a single workflow execution. Scoped to one agent.
+
+**Characteristics:**
+- **Lifetime:** Duration of a single task/workflow (seconds to minutes)
+- **Ownership:** One specific agent
+- **Visibility:** All nodes within the agent's graph
+- **Purpose:** Track task progress, maintain context across reasoning steps
+
+**What Belongs Here:**
+- Current task objectives
+- Conversation history (messages)
+- Retrieved context from knowledge base
+- Intermediate decisions (routing choices, confidence scores)
+- Retry attempts across nodes
+- Working hypotheses being tested
+
+**Examples:**
+```python
+class AgentState(TypedDict):
+    """Working memory for a single RAG agent"""
+    messages: Annotated[list[BaseMessage], add_messages]
+    question: str
+    retrieved_docs: list[Document]
+    relevance_scores: list[float]
+    rewrite_count: int  # Track query rewrites across nodes
+    final_answer: str
+```
+
+**Key Rule:** If multiple nodes in *this agent* need it to coordinate, put it in agent-local state. If only one node needs it, keep it as node scratch.
+
+---
+
+#### 3. **Shared/Global State (Coordination State)**
+
+**Definition:** State that multiple agents or workflows need to coordinate work. Persists beyond individual agent executions.
+
+**Characteristics:**
+- **Lifetime:** Spans multiple tasks, sessions, or agent lifecycles
+- **Ownership:** Shared across agents (requires access control)
+- **Visibility:** All participating agents
+- **Purpose:** Enable multi-agent coordination and cross-task learning
+
+**What Belongs Here:**
+- User preferences (spans sessions)
+- System configuration flags
+- Shared task queues
+- Inter-agent handoff contracts
+- Global truth state (e.g., "user approved plan")
+- Coordination locks or semaphores
+
+**Examples:**
+```python
+class MultiAgentCoordinationState(TypedDict):
+    """Shared state for multi-agent collaboration"""
+    user_id: str
+    session_preferences: dict  # Persists across agents
+    task_queue: list[Task]
+    active_agent: str  # Who currently owns the workflow
+    handoff_contract: dict  # Data passed between agents
+    approval_status: str  # User decisions affecting all agents
+```
+
+**Key Rule:** Only promote state to global scope when multiple agents genuinely need it. Global state introduces coordination overhead — use sparingly.
+
+---
+
+### State Scope & Ownership Table
+
+| **Scope** | **Lifetime** | **Who Owns It** | **What Belongs Here** | **Anti-Patterns** |
+|-----------|--------------|-----------------|----------------------|-------------------|
+| **Node Scratch** | Single node execution | Executing node | Temporary calculations, parsing buffers, draft outputs | Storing in State schema, passing to other nodes, persisting to logs |
+| **Agent-Local** | Single workflow/task | One agent | Task goals, conversation history, retrieved context, routing decisions | Sharing across agents, persisting beyond task completion, storing constants |
+| **Shared/Global** | Multiple tasks/sessions | Multiple agents (with access control) | User preferences, coordination contracts, task queues, approval flags | Storing agent-specific working data, using as a dumping ground for all state |
+
+---
+
+### Example 1: Single-Agent System (Node Scratch vs Workflow State)
+
+**Scenario:** A RAG agent with query routing, retrieval, and answer generation.
+
+**Node Scratch (Never in State):**
+```python
+def retrieve_node(state: AgentState) -> dict:
+    # Scratch: Query preprocessing
+    query = state["question"]
+    cleaned_query = query.lower().strip()
+    token_count = len(cleaned_query.split())
+    
+    # Scratch: Retrieval logic
+    if token_count < 5:
+        top_k = 3
+    else:
+        top_k = 5
+    
+    # State update: Only results matter
+    docs = vector_store.similarity_search(cleaned_query, k=top_k)
+    return {"retrieved_docs": docs}
+```
+
+**Agent-Local State (In MessagesState):**
+```python
+class MessagesState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+    question: str  # Extracted from messages
+    retrieved_docs: list[Document]  # Needed by grader and generator
+    routing_decision: str  # Needed to determine workflow path
+    final_answer: str  # Output of the workflow
+```
+
+**Why This Works:**
+- `cleaned_query`, `token_count`, `top_k` are node-local calculations — no other node needs them
+- `retrieved_docs` must persist because the grader and generator nodes both consume them
+- State contains only what enables cross-node coordination
+
+---
+
+### Example 2: Multi-Agent System (Agent-Local vs Shared Contract Fields)
+
+**Scenario:** A research assistant with two agents: **Researcher** (finds information) and **Writer** (synthesizes reports). They hand off work via shared state.
+
+**Researcher Agent-Local State:**
+```python
+class ResearcherState(TypedDict):
+    """Working memory for Researcher agent only"""
+    search_queries: list[str]
+    sources_visited: list[str]
+    confidence_scores: list[float]
+    research_findings: list[dict]  # Internal accumulation
+```
+
+**Writer Agent-Local State:**
+```python
+class WriterState(TypedDict):
+    """Working memory for Writer agent only"""
+    outline_draft: str
+    section_count: int
+    citations_used: list[str]
+    final_report: str
+```
+
+**Shared Coordination State:**
+```python
+class CoordinationState(TypedDict):
+    """Contract fields for handoffs between agents"""
+    user_query: str  # Original request (both agents need)
+    research_summary: str  # Handoff from Researcher → Writer
+    approved_outline: bool  # User feedback (affects both)
+    current_phase: str  # "researching" | "writing" | "complete"
+    active_agent: str  # Ownership control
+```
+
+**Handoff Pattern:**
+```python
+def researcher_handoff(state: ResearcherState) -> dict:
+    """Researcher completes work and updates shared state"""
+    summary = summarize(state["research_findings"])
+    
+    # Update shared state only — keep findings local
+    return {
+        "research_summary": summary,  # Contract field
+        "current_phase": "writing",
+        "active_agent": "writer"
+    }
+```
+
+**Why This Works:**
+- Each agent maintains its own working state (`research_findings`, `outline_draft`)
+- Only the **handoff contract** (`research_summary`) goes into shared state
+- No agent pollutes shared state with internal working variables
+
+---
+
+### Rules of Thumb (Preventing State Bloat)
+
+Follow these principles to maintain clean state boundaries:
+
+#### ✅ **DO:**
+1. **Start minimal** — Add state fields only when a clear cross-node need exists
+2. **Use node scratch first** — Default to local variables; promote only when necessary
+3. **Document ownership** — Every state field should have a clear "who writes, who reads" answer
+4. **Separate concerns** — Agent-local working data ≠ inter-agent handoff contracts
+5. **Prune aggressively** — Remove state fields that are written but never read
+6. **Version coordination state** — When agents handoff, use explicit contract versions
+
+#### ❌ **DON'T:**
+1. **Store constants in state** — Configuration belongs in environment variables, not state
+2. **Log everything to state** — State ≠ logging (see cross-reference below)
+3. **Share working memory globally** — Don't make agent-local state visible to all agents
+4. **Use state as a dumping ground** — Every field must serve a coordination purpose
+5. **Mix scopes carelessly** — Node scratch leaking into agent state is a code smell
+6. **Persist ephemeral data** — Temporary calculations should never outlive their node
+
+#### 🔍 **Ask Before Adding a Field:**
+- **Who writes it?** (If "multiple nodes inconsistently," redesign)
+- **Who reads it?** (If "nobody after the next node," use scratch instead)
+- **How long does it live?** (If "just this node," use scratch; if "this task," agent-local; if "multiple tasks," shared)
+- **What happens if it's missing?** (If "nothing breaks," delete it)
+
+---
+
+### Cross-References: Related Concepts
+
+This module builds on foundational state management concepts covered elsewhere:
+
+- **State vs Logging** → See [agent_state.md](agentic_ai_notes/Agent_State/agent_state.md) Section 4-5 for the critical distinction: *State enables reasoning; logging observes behavior.* Not all state changes should be logged.
+  
+- **Four Classes of State Updates** → [agent_state.md](agentic_ai_notes/Agent_State/agent_state.md) Section 5 categorizes updates as Ephemeral Reasoning, Decision-Relevant, External Interaction, or Memory-Qualifying — this directly maps to our scope model.
+
+- **Multi-Agent Coordination Patterns** → [agent_state_framework.md](Essays:Papers/agent_state_framework.md) Section 6 explores centralized, decentralized, hierarchical, and blackboard models — each has different implications for shared state architecture.
+
+- **CoALA Working Memory Framework** → [agent_state_framework.md](Essays:Papers/agent_state_framework.md) Section 2.2 provides the theoretical foundation: working memory as the substrate for reasoning, distinct from long-term memory.
+
+**Key Insight from Cross-References:**  
+The scope model presented here operationalizes CoALA's working memory concept: node scratch = ephemeral scratchpad, agent-local = working memory, shared = coordination layer. Understanding scope prevents the common mistake of treating all state equally.
+
+---
+
+### Self-Review Checklist
+
+Before finalizing your state schema, validate:
+
+- [ ] Every state field has a documented scope (node/agent/shared)
+- [ ] Node scratch is used for all single-node calculations
+- [ ] Agent-local state contains only cross-node coordination data
+- [ ] Shared state is minimal and has clear ownership rules
+- [ ] No constants or configuration stored in state
+- [ ] State schema matches the actual coordination needs (not speculative "might need this")
+- [ ] Logging strategy is separate from state persistence strategy
+
+**Remember:** State bloat is a leading cause of agent debugging nightmares. When in doubt, keep it local. Promote to broader scope only when coordination demands it.
 
 ⸻
 
