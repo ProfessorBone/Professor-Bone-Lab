@@ -64,6 +64,7 @@ The AGI Architecture Blueprint, 9-Phase Roadmap, and Systems Diagrams are advanc
 • Memory Lifecycle & Anti-Bloat Patterns
 • State Persistence: Checkpoints, Event Logs, and Replay
 • Observability: Mapping State Updates to Telemetry (Without State Dumps)
+• Multi-Agent State Contracts & Handoff Validation
 • Tier 0 · Prereqs & Principles
 • Tier 1 · Basic Agent (MVP Chat + Single Tool)
 • Tier 2 · Intermediate Agent (RAG + Tools + Simple Memory)
@@ -2597,6 +2598,670 @@ Before deploying observability instrumentation:
 ---
 
 **Remember:** Observability is about signal, not volume. The four-category taxonomy ensures you capture what matters while ignoring what doesn't. An agent with 10 decision traces and 5 tool call spans is easier to debug than one drowning in 1000 full state dumps.
+
+⸻
+
+## Multi-Agent State Contracts & Handoff Validation
+
+**Concept Capsule:**
+In multi-agent systems, the most insidious bugs come from implicit assumptions about shared state. One agent writes a field, another assumes it exists and has a specific format, and chaos ensues. State contracts make these assumptions explicit — defining what each agent reads, writes, and guarantees. This module teaches contract-driven multi-agent design with validation at handoff boundaries.
+
+**Learning Objectives**
+• Define explicit state contracts with reads, writes, preconditions, and postconditions
+• Implement edge guard validation to enforce contracts at agent boundaries
+• Apply reducer and merge strategies to handle concurrent writes to shared state
+• Detect and resolve state conflicts in multi-agent orchestration
+• Build robust handoff logic that fails fast on contract violations
+
+---
+
+### Anatomy of a State Contract
+
+A **state contract** is a formal specification of an agent's interaction with shared state. It answers four critical questions:
+
+#### **Contract Components**
+
+```python
+from typing import TypedDict, Callable
+
+class StateContract(TypedDict):
+    """Explicit contract for agent-state interaction"""
+    
+    agent_name: str
+    # Who is this agent?
+    
+    reads: list[str]
+    # What state fields does this agent READ?
+    # These must exist before the agent executes
+    
+    writes: list[str]
+    # What state fields does this agent WRITE?
+    # These are guaranteed to exist after execution
+    
+    preconditions: list[Callable[[dict], bool]]
+    # What must be true BEFORE this agent can execute?
+    # Example: "user_query must be non-empty"
+    
+    postconditions: list[Callable[[dict], bool]]
+    # What must be true AFTER this agent executes?
+    # Example: "research_summary must be present"
+```
+
+**Why Contracts Matter:**
+1. **Documentation** — Self-documenting system ("what does this agent need?")
+2. **Validation** — Enforce guarantees at runtime (fail fast on violations)
+3. **Debugging** — Clear failure messages ("Agent X violated contract: missing field Y")
+4. **Evolution** — Safe refactoring (changing a contract forces you to update dependents)
+5. **Composition** — Build complex workflows from validated components
+
+---
+
+### Example Contract Set: Research → Writing → Review Pipeline
+
+Let's define contracts for a three-agent system:
+
+#### **Agent 1: Researcher**
+
+**Role:** Gather information from external sources based on user query.
+
+```python
+RESEARCHER_CONTRACT = {
+    "agent_name": "researcher",
+    
+    "reads": [
+        "user_query",      # Input from user
+        "task_id",         # Shared task identifier
+    ],
+    
+    "writes": [
+        "research_findings",   # List of sources/facts
+        "research_summary",    # Condensed overview
+        "source_count",        # Number of sources consulted
+        "research_confidence", # 0.0-1.0 confidence score
+    ],
+    
+    "preconditions": [
+        lambda state: "user_query" in state and len(state["user_query"]) > 0,
+        lambda state: "task_id" in state,
+    ],
+    
+    "postconditions": [
+        lambda state: "research_summary" in state and len(state["research_summary"]) > 0,
+        lambda state: "source_count" in state and state["source_count"] > 0,
+        lambda state: 0.0 <= state.get("research_confidence", 0.0) <= 1.0,
+    ]
+}
+```
+
+**Contract Guarantees:**
+- **Before:** User query exists and is non-empty
+- **After:** Research summary exists, at least one source consulted, confidence is valid
+
+---
+
+#### **Agent 2: Writer**
+
+**Role:** Synthesize research into a coherent report.
+
+```python
+WRITER_CONTRACT = {
+    "agent_name": "writer",
+    
+    "reads": [
+        "user_query",          # Original question
+        "research_summary",    # From researcher
+        "research_findings",   # Detailed sources
+        "task_id",
+    ],
+    
+    "writes": [
+        "draft_report",        # Full report text
+        "section_count",       # Number of sections
+        "word_count",          # Report length
+        "citations_used",      # List of cited sources
+    ],
+    
+    "preconditions": [
+        # Depends on researcher's output
+        lambda state: "research_summary" in state and len(state["research_summary"]) > 0,
+        lambda state: "research_findings" in state,
+        lambda state: "user_query" in state,
+    ],
+    
+    "postconditions": [
+        lambda state: "draft_report" in state and len(state["draft_report"]) > 100,
+        lambda state: "word_count" in state and state["word_count"] > 0,
+        lambda state: "citations_used" in state and len(state["citations_used"]) > 0,
+    ]
+}
+```
+
+**Contract Guarantees:**
+- **Before:** Research summary and findings exist (researcher completed)
+- **After:** Draft report exists with minimum length, has citations
+
+---
+
+#### **Agent 3: Reviewer**
+
+**Role:** Quality-check the report and suggest improvements.
+
+```python
+REVIEWER_CONTRACT = {
+    "agent_name": "reviewer",
+    
+    "reads": [
+        "draft_report",        # From writer
+        "user_query",          # Original question
+        "research_findings",   # To verify accuracy
+        "task_id",
+    ],
+    
+    "writes": [
+        "review_feedback",     # List of issues/suggestions
+        "quality_score",       # 0.0-1.0 rating
+        "approved",            # Boolean: ready to ship?
+        "revision_needed",     # Boolean: needs rewrite?
+    ],
+    
+    "preconditions": [
+        # Depends on writer's output
+        lambda state: "draft_report" in state and len(state["draft_report"]) > 0,
+        lambda state: "user_query" in state,
+    ],
+    
+    "postconditions": [
+        lambda state: "quality_score" in state and 0.0 <= state["quality_score"] <= 1.0,
+        lambda state: "approved" in state and isinstance(state["approved"], bool),
+        lambda state: "revision_needed" in state and isinstance(state["revision_needed"], bool),
+        # Logical consistency: can't be both approved and needing revision
+        lambda state: not (state["approved"] and state["revision_needed"]),
+    ]
+}
+```
+
+**Contract Guarantees:**
+- **Before:** Draft report exists (writer completed)
+- **After:** Review feedback and approval decision exist, scores are valid
+
+---
+
+### Handoff Validation with Edge Guards
+
+Contracts are worthless without enforcement. **Edge guards** validate contracts at agent boundaries.
+
+#### **Where Validation Occurs in Orchestration**
+
+```
+┌─────────────┐
+│   START     │
+└──────┬──────┘
+       │
+       ▼
+┌─────────────────────────┐
+│ Validate Preconditions  │ ◄─── EDGE GUARD (before researcher)
+│ (researcher contract)   │
+└──────┬──────────────────┘
+       │ ✅ Pass
+       ▼
+┌─────────────┐
+│ Researcher  │
+│   Agent     │
+└──────┬──────┘
+       │
+       ▼
+┌─────────────────────────┐
+│ Validate Postconditions │ ◄─── EDGE GUARD (after researcher)
+│ (researcher contract)   │
+└──────┬──────────────────┘
+       │ ✅ Pass
+       ▼
+┌─────────────────────────┐
+│ Validate Preconditions  │ ◄─── EDGE GUARD (before writer)
+│ (writer contract)       │
+└──────┬──────────────────┘
+       │ ✅ Pass
+       ▼
+┌─────────────┐
+│   Writer    │
+│   Agent     │
+└──────┬──────┘
+       │
+       ▼
+┌─────────────────────────┐
+│ Validate Postconditions │ ◄─── EDGE GUARD (after writer)
+│ (writer contract)       │
+└──────┬──────────────────┘
+       │ ✅ Pass
+       ▼
+     ...
+```
+
+#### **Implementation: Edge Guard Functions**
+
+```python
+class ContractViolation(Exception):
+    """Raised when state contract is violated"""
+    pass
+
+def validate_preconditions(state: dict, contract: dict) -> None:
+    """
+    Validate that state satisfies agent preconditions.
+    Raises ContractViolation if any check fails.
+    """
+    agent_name = contract["agent_name"]
+    
+    # Check all required reads exist
+    for field in contract["reads"]:
+        if field not in state:
+            raise ContractViolation(
+                f"Precondition failed for {agent_name}: "
+                f"required field '{field}' missing from state"
+            )
+    
+    # Check all precondition functions
+    for i, condition in enumerate(contract["preconditions"]):
+        if not condition(state):
+            raise ContractViolation(
+                f"Precondition {i} failed for {agent_name}: "
+                f"state does not satisfy contract requirements"
+            )
+
+def validate_postconditions(state: dict, contract: dict) -> None:
+    """
+    Validate that state satisfies agent postconditions.
+    Raises ContractViolation if any check fails.
+    """
+    agent_name = contract["agent_name"]
+    
+    # Check all promised writes exist
+    for field in contract["writes"]:
+        if field not in state:
+            raise ContractViolation(
+                f"Postcondition failed for {agent_name}: "
+                f"promised field '{field}' was not written to state"
+            )
+    
+    # Check all postcondition functions
+    for i, condition in enumerate(contract["postconditions"]):
+        if not condition(state):
+            raise ContractViolation(
+                f"Postcondition {i} failed for {agent_name}: "
+                f"state does not satisfy contract guarantees"
+            )
+```
+
+#### **LangGraph Integration: Guard Nodes**
+
+```python
+from langgraph.graph import StateGraph
+
+def create_guarded_workflow():
+    graph = StateGraph(MultiAgentState)
+    
+    # Add agent nodes
+    graph.add_node("researcher", researcher_agent)
+    graph.add_node("writer", writer_agent)
+    graph.add_node("reviewer", reviewer_agent)
+    
+    # Add guard nodes
+    graph.add_node("guard_researcher_pre", 
+                   lambda state: validate_preconditions(state, RESEARCHER_CONTRACT) or state)
+    graph.add_node("guard_researcher_post",
+                   lambda state: validate_postconditions(state, RESEARCHER_CONTRACT) or state)
+    graph.add_node("guard_writer_pre",
+                   lambda state: validate_preconditions(state, WRITER_CONTRACT) or state)
+    graph.add_node("guard_writer_post",
+                   lambda state: validate_postconditions(state, WRITER_CONTRACT) or state)
+    
+    # Wire guards around agents
+    graph.add_edge("START", "guard_researcher_pre")
+    graph.add_edge("guard_researcher_pre", "researcher")
+    graph.add_edge("researcher", "guard_researcher_post")
+    graph.add_edge("guard_researcher_post", "guard_writer_pre")
+    graph.add_edge("guard_writer_pre", "writer")
+    graph.add_edge("writer", "guard_writer_post")
+    # ... continue pattern
+    
+    return graph.compile()
+```
+
+**Key Pattern:** Every agent is sandwiched between pre/post validation guards.
+
+---
+
+### Alternative: Conditional Edge Guards
+
+For production, avoid dedicated guard nodes (adds overhead). Use **conditional edges** instead:
+
+```python
+def validate_and_route(state: dict, next_agent: str, contract: dict) -> str:
+    """
+    Validate preconditions before routing to next agent.
+    Returns next_agent if valid, 'error_handler' if invalid.
+    """
+    try:
+        validate_preconditions(state, contract)
+        return next_agent
+    except ContractViolation as e:
+        # Log violation and route to error handler
+        logger.error(f"Contract violation: {e}")
+        state["error"] = str(e)
+        return "error_handler"
+
+# In graph definition
+graph.add_conditional_edges(
+    "researcher",
+    lambda state: validate_and_route(state, "writer", WRITER_CONTRACT),
+    {
+        "writer": "writer",
+        "error_handler": "handle_contract_violation"
+    }
+)
+```
+
+**Benefit:** Validation is integrated into routing logic, no extra nodes.
+
+---
+
+### Reducers & Merge Strategies for Shared State
+
+When multiple agents write to the same state field, conflicts arise. **Reducers** define merge logic.
+
+#### **The Conflict Problem**
+
+```python
+# Scenario: Two agents running in parallel both update 'confidence_score'
+
+# Agent A writes:
+state["confidence_score"] = 0.8
+
+# Agent B writes:
+state["confidence_score"] = 0.6
+
+# Which value wins? Last write? Average? Max?
+# Without a reducer, behavior is undefined (usually last write wins)
+```
+
+#### **Solution: Define Reducers in State Schema**
+
+```python
+from typing import Annotated
+from langgraph.graph import add_messages
+
+def max_confidence(existing: float, new: float) -> float:
+    """Reducer: take maximum confidence score"""
+    return max(existing, new)
+
+def merge_findings(existing: list, new: list) -> list:
+    """Reducer: merge lists, deduplicate"""
+    return list(set(existing + new))
+
+def average_scores(existing: float, new: float) -> float:
+    """Reducer: compute running average"""
+    # Assumes we track count separately (simplified)
+    return (existing + new) / 2
+
+class MultiAgentState(TypedDict):
+    # Standard fields (last write wins)
+    task_id: str
+    user_query: str
+    
+    # Messages (special reducer from LangGraph)
+    messages: Annotated[list, add_messages]  # Appends new messages
+    
+    # Custom reducers for conflict resolution
+    confidence_score: Annotated[float, max_confidence]  # Take max
+    research_findings: Annotated[list, merge_findings]  # Merge + dedupe
+    quality_scores: Annotated[float, average_scores]    # Average
+```
+
+#### **Common Reducer Patterns**
+
+| **Use Case** | **Reducer** | **Example** |
+|--------------|-------------|-------------|
+| Accumulate items | `merge_lists` | Multiple agents add to findings list |
+| Highest value wins | `max_reducer` | Confidence scores, priority levels |
+| Lowest value wins | `min_reducer` | Cost estimates, risk scores |
+| Average values | `average_reducer` | Quality scores from multiple reviewers |
+| First write wins | `first_write_wins` | Lock-like behavior ("claimed_by") |
+| Last write wins | (default) | Final decision fields |
+| Custom logic | User-defined | Domain-specific merge rules |
+
+#### **Reducer Implementation**
+
+```python
+from typing import TypeVar, Callable
+
+T = TypeVar('T')
+
+def create_reducer(merge_fn: Callable[[T, T], T]) -> Callable:
+    """
+    Factory for creating reducer annotations.
+    """
+    def reducer(existing: T, new: T) -> T:
+        if existing is None:
+            return new
+        if new is None:
+            return existing
+        return merge_fn(existing, new)
+    return reducer
+
+# Usage
+max_reducer = create_reducer(lambda a, b: max(a, b))
+merge_lists = create_reducer(lambda a, b: list(set(a + b)))
+```
+
+---
+
+### Conflict Detection & Resolution
+
+Even with reducers, you may need explicit conflict detection.
+
+#### **Conflict Detection Patterns**
+
+**Pattern 1: Version Stamps**
+```python
+class VersionedState(TypedDict):
+    draft_report: str
+    draft_report_version: int      # Increment on write
+    draft_report_last_writer: str  # Track who wrote
+
+def write_draft(state: dict, new_draft: str, writer_id: str) -> dict:
+    current_version = state.get("draft_report_version", 0)
+    
+    # Optimistic concurrency: check version hasn't changed
+    if state.get("draft_report_last_writer") and \
+       state["draft_report_last_writer"] != writer_id and \
+       current_version > 0:
+        # Conflict detected: someone else wrote since we started
+        raise ConflictError(f"Draft modified by {state['draft_report_last_writer']}")
+    
+    return {
+        "draft_report": new_draft,
+        "draft_report_version": current_version + 1,
+        "draft_report_last_writer": writer_id
+    }
+```
+
+**Pattern 2: Ownership Locks**
+```python
+class LockableState(TypedDict):
+    draft_report: str
+    draft_owner: str | None  # Who currently owns this field
+
+def acquire_lock(state: dict, agent_name: str, field: str) -> bool:
+    """Try to acquire exclusive write lock on a field"""
+    lock_key = f"{field}_owner"
+    
+    if state.get(lock_key) is None:
+        # Lock is free
+        state[lock_key] = agent_name
+        return True
+    elif state[lock_key] == agent_name:
+        # We already own it
+        return True
+    else:
+        # Someone else owns it
+        return False
+
+def writer_agent(state: dict) -> dict:
+    if not acquire_lock(state, "writer", "draft_report"):
+        raise ConflictError("Draft report is locked by another agent")
+    
+    # Proceed with write
+    new_draft = generate_report(state)
+    return {"draft_report": new_draft}
+```
+
+**Pattern 3: Conflict Markers (Git-Style)**
+```python
+def merge_with_markers(field_a: str, field_b: str, agent_a: str, agent_b: str) -> str:
+    """Git-style conflict markers for manual resolution"""
+    return f"""
+<<<<<<< {agent_a}
+{field_a}
+=======
+{field_b}
+>>>>>>> {agent_b}
+"""
+
+def detect_and_mark_conflicts(state: dict) -> dict:
+    """Find conflicting writes and mark them for human review"""
+    if state.get("draft_report_conflict"):
+        conflicted = merge_with_markers(
+            state["draft_report_version_a"],
+            state["draft_report_version_b"],
+            "writer",
+            "reviewer"
+        )
+        return {
+            "draft_report": conflicted,
+            "requires_human_resolution": True
+        }
+    return {}
+```
+
+---
+
+### Handoff Validation Checklist
+
+Before deploying multi-agent workflows:
+
+#### **Contract Definition**
+- [ ] Every agent has an explicit contract (reads, writes, pre/post conditions)
+- [ ] Contracts are documented and version-controlled
+- [ ] Preconditions cover all required inputs (dependencies)
+- [ ] Postconditions guarantee all promised outputs
+- [ ] Contracts include validation for data types and ranges
+
+#### **Edge Guard Implementation**
+- [ ] Preconditions validated before agent execution
+- [ ] Postconditions validated after agent execution
+- [ ] Contract violations raise clear exceptions (not silent failures)
+- [ ] Violations are logged with full context (agent, field, expected vs actual)
+- [ ] Error handlers defined for contract violation recovery
+
+#### **Reducer Strategy**
+- [ ] Shared state fields have explicit reducers (no implicit last-write-wins)
+- [ ] Reducers tested with concurrent writes
+- [ ] Merge logic matches domain semantics (max, merge, average, etc.)
+- [ ] Reducer behavior documented in state schema
+
+#### **Conflict Handling**
+- [ ] Conflict detection strategy chosen (version stamps, locks, or markers)
+- [ ] Conflict resolution logic implemented (automatic or manual)
+- [ ] Conflicts logged for analysis
+- [ ] Human-in-the-loop fallback for unresolvable conflicts
+
+#### **Testing**
+- [ ] Unit tests for each contract's pre/postconditions
+- [ ] Integration tests for full handoff sequences
+- [ ] Concurrency tests for parallel agent execution
+- [ ] Failure tests (what happens when contract is violated?)
+- [ ] Reducer tests with edge cases (empty lists, null values, etc.)
+
+---
+
+### Practical Example: Full Contract Enforcement
+
+```python
+from langgraph.graph import StateGraph
+from typing import TypedDict, Annotated
+
+# State schema with reducers
+class ResearchPipelineState(TypedDict):
+    task_id: str
+    user_query: str
+    
+    # Researcher outputs
+    research_summary: str
+    source_count: int
+    
+    # Writer outputs
+    draft_report: str
+    word_count: int
+    
+    # Reviewer outputs
+    approved: bool
+    quality_score: Annotated[float, lambda a, b: max(a, b)]  # Max score
+
+# Build graph with contracts
+def build_validated_pipeline():
+    graph = StateGraph(ResearchPipelineState)
+    
+    # Wrap agents with validation
+    def validated_researcher(state: dict) -> dict:
+        validate_preconditions(state, RESEARCHER_CONTRACT)
+        result = researcher_agent(state)
+        new_state = {**state, **result}
+        validate_postconditions(new_state, RESEARCHER_CONTRACT)
+        return result
+    
+    def validated_writer(state: dict) -> dict:
+        validate_preconditions(state, WRITER_CONTRACT)
+        result = writer_agent(state)
+        new_state = {**state, **result}
+        validate_postconditions(new_state, WRITER_CONTRACT)
+        return result
+    
+    # Add validated nodes
+    graph.add_node("researcher", validated_researcher)
+    graph.add_node("writer", validated_writer)
+    graph.add_node("reviewer", lambda s: reviewer_agent(s))  # Add validation similarly
+    
+    # Error handler
+    graph.add_node("handle_error", lambda s: {"error": s.get("error", "Unknown")})
+    
+    # Define edges with error routing
+    graph.add_edge("START", "researcher")
+    graph.add_conditional_edges(
+        "researcher",
+        lambda s: "writer" if "research_summary" in s else "handle_error",
+        {"writer": "writer", "handle_error": "handle_error"}
+    )
+    graph.add_edge("writer", "reviewer")
+    graph.add_edge("reviewer", "END")
+    
+    return graph.compile()
+
+# Run pipeline
+pipeline = build_validated_pipeline()
+initial_state = {
+    "task_id": "task_123",
+    "user_query": "Explain quantum computing"
+}
+
+try:
+    result = pipeline.invoke(initial_state)
+    print(f"Pipeline completed: {result['approved']}")
+except ContractViolation as e:
+    print(f"Contract violation: {e}")
+```
+
+---
+
+**Remember:** In multi-agent systems, implicit state assumptions are bugs waiting to happen. Contracts make guarantees explicit, guards enforce them at runtime, and reducers prevent conflicts. An hour spent defining contracts saves days of debugging mysterious handoff failures.
 
 ⸻
 
