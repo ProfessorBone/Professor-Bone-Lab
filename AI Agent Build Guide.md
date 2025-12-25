@@ -899,6 +899,157 @@ class MultiAgentCoordinationState(TypedDict):
 
 ---
 
+### Critical Distinction: Node Scratch vs Agent State
+
+**Understanding the difference prevents accidental state bloat in graph-based systems.**
+
+| **Aspect** | **Node-Local Scratch** | **Agent-Local Working State** |
+|------------|------------------------|-------------------------------|
+| **Lifespan** | Single step (one node execution) | Multiple steps (entire workflow) |
+| **Scope** | Ephemeral (dies when node completes) | Defines the agent's cognitive horizon |
+| **Access** | Never persisted or shared | Mutated intentionally across nodes |
+| **Purpose** | Internal calculations only | Coordination across reasoning steps |
+| **Evolution** | N/A (deleted immediately) | Pruned over time as task progresses |
+
+**Why This Matters:**
+
+In graph-based orchestration frameworks (LangGraph, CrewAI, etc.), it's tempting to add every intermediate variable to the state schema "just in case." This creates **accidental bloat** — state grows with every node, serialization slows down, and debugging becomes impossible because state contains 90% noise.
+
+**Rule of Thumb:**
+- If only the current node needs it → **Node scratch** (local variable)
+- If the next 2-3 nodes need it → **Agent state** (add to schema)
+- If all agents need it → **Shared state** (coordination field)
+
+**Example of Confusion:**
+```python
+# ❌ WRONG: Adding scratch calculations to state
+def analyze_node(state: AgentState) -> dict:
+    # These are scratch variables...
+    word_count = len(state["query"].split())
+    has_keywords = any(kw in state["query"] for kw in KEYWORDS)
+    sentiment = analyze_sentiment(state["query"])
+    
+    # ...but developer adds them to state schema "for debugging"
+    return {
+        "word_count": word_count,        # ❌ Only this node uses it
+        "has_keywords": has_keywords,    # ❌ Only this node uses it
+        "sentiment": sentiment,          # ❌ Only this node uses it
+        "analysis_complete": True        # ✅ Next node checks this
+    }
+
+# ✅ CORRECT: Keep scratch local, only share what's needed
+def analyze_node(state: AgentState) -> dict:
+    # Scratch variables (never enter state)
+    word_count = len(state["query"].split())
+    has_keywords = any(kw in state["query"] for kw in KEYWORDS)
+    sentiment = analyze_sentiment(state["query"])
+    
+    # Only the decision enters state
+    analysis_result = "needs_retrieval" if has_keywords else "direct_answer"
+    return {"analysis_result": analysis_result}
+```
+
+Confusing these scopes leads to **state bloat**, where every node adds 3-5 fields that no other node reads, ballooning state from 5 fields to 50+ fields by the end of the workflow.
+
+---
+
+### Minimal Working State Skeleton (Reference)
+
+**A reference scaffold for agent-local state. Not a required template — extend as needed, but preserve these principles.**
+
+```python
+from typing import TypedDict, Literal
+
+class MinimalAgentState(TypedDict):
+    """
+    Minimal working state for a single-agent workflow.
+    Keep it lean — only fields used across multiple nodes.
+    """
+    
+    # Task identity
+    task_id: str
+    goal: str  # What the agent is trying to accomplish
+    
+    # Workflow tracking
+    phase: Literal["planning", "execution", "validation", "complete"]
+    last_decision: str  # Most recent routing/branching decision
+    
+    # Working context (compressed)
+    working_summary: str  # Evolving summary of progress so far
+    
+    # Memory references (IDs only, not full objects)
+    retrieved_memory_refs: list[str]  # Episodic/procedural memory pointers
+    
+    # Quality/confidence
+    confidence: float  # 0.0-1.0, agent's self-assessed confidence
+    
+    # Output
+    output_artifact_id: str | None  # Pointer to final output (not inline)
+    
+    # Error handling
+    status: Literal["active", "paused", "error", "complete"]
+    error_message: str | None  # Only present if status == "error"
+```
+
+**Design Principles Embedded:**
+
+1. **Identity** (`task_id`, `goal`) — Know what we're doing and why
+2. **Phase tracking** (`phase`, `last_decision`) — Workflow state machine
+3. **Compression** (`working_summary`) — Not full history, just current context
+4. **Pointer-replace** (`retrieved_memory_refs`, `output_artifact_id`) — IDs, not full objects
+5. **Self-awareness** (`confidence`, `status`) — Agent knows its own state
+6. **Error transparency** (`error_message`) — Fail explicitly, not silently
+
+**What This Skeleton Omits (Add If Needed):**
+
+- `messages: list` — Add for conversational agents
+- `tool_outputs: list` — Add if tracking tool call history
+- `retry_count: int` — Add if implementing retry logic
+- `user_id: str` — Add for multi-user systems
+- `checkpoints: list[str]` — Add if using incremental checkpointing
+
+**Usage Example:**
+
+```python
+# Initialize at task start
+initial_state: MinimalAgentState = {
+    "task_id": "task_12345",
+    "goal": "Summarize research paper on quantum computing",
+    "phase": "planning",
+    "last_decision": "start",
+    "working_summary": "",
+    "retrieved_memory_refs": [],
+    "confidence": 1.0,
+    "output_artifact_id": None,
+    "status": "active",
+    "error_message": None
+}
+
+# Evolve through workflow
+def planning_node(state: MinimalAgentState) -> dict:
+    # Update phase and summary
+    return {
+        "phase": "execution",
+        "last_decision": "retrieve_sources",
+        "working_summary": "Identified 3 key sections to analyze"
+    }
+
+# Complete task
+def finalize_node(state: MinimalAgentState) -> dict:
+    # Store output, mark complete
+    artifact_id = save_to_storage(state["working_summary"])
+    return {
+        "phase": "complete",
+        "output_artifact_id": artifact_id,
+        "status": "complete",
+        "confidence": 0.95
+    }
+```
+
+**Key Insight:** This skeleton has ~10 fields, yet supports complex workflows. Real systems may add 5-10 more, but **rarely need more than 20 fields total**. If your state schema exceeds 30 fields, you're likely violating the node scratch vs agent state boundary.
+
+---
+
 ### State Scope & Ownership Table
 
 | **Scope** | **Lifetime** | **Who Owns It** | **What Belongs Here** | **Anti-Patterns** |
