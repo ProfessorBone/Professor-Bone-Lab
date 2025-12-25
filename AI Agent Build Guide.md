@@ -62,6 +62,7 @@ The AGI Architecture Blueprint, 9-Phase Roadmap, and Systems Diagrams are advanc
 • The Standard RAG-Agent Build Workflow
 • State Scope & Ownership (Local vs Global State)
 • Memory Lifecycle & Anti-Bloat Patterns
+• State Persistence: Checkpoints, Event Logs, and Replay
 • Tier 0 · Prereqs & Principles
 • Tier 1 · Basic Agent (MVP Chat + Single Tool)
 • Tier 2 · Intermediate Agent (RAG + Tools + Simple Memory)
@@ -1452,6 +1453,526 @@ graph.add_conditional_edges("observe", should_prune, {
 ---
 
 **Remember:** Memory is a force multiplier for agents — but only when managed with discipline. Query sparingly, write selectively, compress aggressively, and prune ruthlessly. An agent with 10 well-chosen memories outperforms one drowning in 10,000 unfiltered episodes.
+
+⸻
+
+## State Persistence: Checkpoints, Event Logs, and Replay
+
+**Concept Capsule:**
+Agent workflows can fail, timeout, or require human-in-the-loop pauses. Without persistence, you lose all progress and must restart from scratch. This module teaches three persistence strategies — snapshot checkpointing, event sourcing, and hybrid approaches — along with practical guidance for checkpoint cadence, state rehydration, and schema evolution.
+
+**Learning Objectives**
+• Understand snapshot checkpointing vs event sourcing vs hybrid persistence models
+• Choose appropriate checkpoint cadence based on workflow type (HITL vs batch vs cost-sensitive)
+• Implement rehydration logic to rebuild working state from memory pointers and checkpoints
+• Plan for schema versioning and migration as agent capabilities evolve
+
+---
+
+### Three Persistence Strategies
+
+#### 1. **Snapshot Checkpointing**
+
+**Definition:** Periodically save the complete current state to durable storage (database, file system, object store). Think of it as "save game" snapshots.
+
+**How It Works:**
+```python
+def checkpoint_node(state: AgentState) -> dict:
+    """Save full state snapshot to database"""
+    checkpoint_id = f"ckpt_{state['task_id']}_{datetime.now().isoformat()}"
+    
+    checkpoint_data = {
+        "id": checkpoint_id,
+        "task_id": state["task_id"],
+        "timestamp": time.time(),
+        "state_snapshot": state,  # Full state serialization
+        "node_name": "current_node",
+        "schema_version": "v1.2.0"
+    }
+    
+    db.checkpoints.insert_one(checkpoint_data)
+    return {"last_checkpoint_id": checkpoint_id}
+```
+
+**Pros:**
+- Simple to implement (just serialize state)
+- Fast recovery (single read restores full state)
+- Easy to reason about (what you save is what you get)
+
+**Cons:**
+- Storage grows with state size (can be large for rich state)
+- No audit trail of intermediate steps
+- Redundant data if state changes slowly
+
+**Best For:**
+- Long-running workflows with infrequent checkpoints
+- Human-in-the-loop workflows where you pause/resume
+- Simple agent architectures without complex event history needs
+
+---
+
+#### 2. **Event Sourcing**
+
+**Definition:** Store only the sequence of state changes (events), not the state itself. State is reconstructed by replaying events from the beginning.
+
+**How It Works:**
+```python
+class StateEvent(TypedDict):
+    event_id: str
+    task_id: str
+    timestamp: float
+    event_type: str  # "message_added", "tool_called", "decision_made"
+    payload: dict    # The actual change
+    node_name: str
+
+def log_event(task_id: str, event_type: str, payload: dict):
+    """Append event to the event log"""
+    event = {
+        "event_id": str(uuid.uuid4()),
+        "task_id": task_id,
+        "timestamp": time.time(),
+        "event_type": event_type,
+        "payload": payload,
+        "node_name": current_node_name()
+    }
+    event_store.append(event)
+
+def rebuild_state(task_id: str) -> AgentState:
+    """Reconstruct state by replaying all events"""
+    events = event_store.get_events(task_id, order="asc")
+    state = initial_state(task_id)
+    
+    for event in events:
+        state = apply_event(state, event)  # Replay each event
+    
+    return state
+```
+
+**Pros:**
+- Complete audit trail (see every state transition)
+- Storage efficient for sparse changes
+- Enables time-travel debugging (replay to any point)
+- Natural fit for event-driven architectures
+
+**Cons:**
+- Slower recovery (must replay all events)
+- More complex implementation (need event handlers)
+- Replay cost grows with task length
+
+**Best For:**
+- High-compliance environments (audit requirements)
+- Debugging and evaluation (need full execution trace)
+- Multi-agent systems with complex event interactions
+
+---
+
+#### 3. **Hybrid Approach (Recommended)**
+
+**Definition:** Combine snapshots and events — checkpoint periodically, log events in between. Recovery replays events since last checkpoint.
+
+**How It Works:**
+```python
+def checkpoint_with_events(state: AgentState, events_since_last: list[StateEvent]):
+    """Save snapshot + recent events"""
+    checkpoint_id = f"ckpt_{state['task_id']}_{datetime.now().isoformat()}"
+    
+    # Save snapshot
+    db.checkpoints.insert_one({
+        "id": checkpoint_id,
+        "state_snapshot": state,
+        "timestamp": time.time(),
+        "schema_version": CURRENT_SCHEMA_VERSION
+    })
+    
+    # Mark events as "checkpointed" (can be archived)
+    for event in events_since_last:
+        event_store.mark_checkpointed(event["event_id"], checkpoint_id)
+
+def recover_state(task_id: str) -> AgentState:
+    """Load last checkpoint + replay events since"""
+    # Get most recent checkpoint
+    checkpoint = db.checkpoints.find_one(
+        {"task_id": task_id},
+        sort=[("timestamp", -1)]
+    )
+    
+    if not checkpoint:
+        # No checkpoint — replay all events
+        return rebuild_from_events(task_id)
+    
+    # Start from checkpoint
+    state = checkpoint["state_snapshot"]
+    
+    # Replay events since checkpoint
+    events_since = event_store.get_events_after(
+        task_id,
+        after_timestamp=checkpoint["timestamp"]
+    )
+    
+    for event in events_since:
+        state = apply_event(state, event)
+    
+    return state
+```
+
+**Pros:**
+- Fast recovery (checkpoint + few events)
+- Full audit trail (events preserved)
+- Storage efficient (periodic snapshots, light event log)
+- Balances complexity and performance
+
+**Cons:**
+- More moving parts (checkpoint + event logic)
+- Requires coordination between snapshot and event systems
+
+**Best For:**
+- Production multi-agent systems
+- Long-running tasks with observability needs
+- Any system requiring both recovery speed and audit compliance
+
+**Recommendation:** Use hybrid for any agent beyond Tier 1. It's the production-grade pattern.
+
+---
+
+### Recommended Checkpoint Cadence
+
+How often should you checkpoint? It depends on your workflow characteristics:
+
+#### **Per-Node Checkpointing (Fine-Grained)**
+
+**When to Use:**
+- Human-in-the-loop (HITL) workflows where users pause/resume
+- High-cost tool calls (expensive APIs, long-running computations)
+- Workflows with high failure risk (external API dependencies)
+
+**Implementation:**
+```python
+# Checkpoint after every node
+graph.add_node("retrieve", retrieve_node)
+graph.add_node("checkpoint_1", checkpoint_node)
+graph.add_edge("retrieve", "checkpoint_1")
+graph.add_edge("checkpoint_1", "generate")
+```
+
+**Pros:**
+- Minimal progress loss on failure (at most one node's work)
+- Easy resume for HITL (user returns, continue from exact spot)
+- Fine-grained recovery granularity
+
+**Cons:**
+- Higher checkpoint overhead (more I/O)
+- Can slow down fast workflows
+- Increases storage costs
+
+**Rule of Thumb:** Checkpoint per-node when:
+- Node execution time > 10 seconds
+- Node has side effects (tool calls, API writes)
+- Workflow requires user approval before proceeding
+
+---
+
+#### **Per-Phase Checkpointing (Coarse-Grained)**
+
+**When to Use:**
+- Cost-sensitive batch runs (minimize checkpoint I/O)
+- Fast-executing nodes (< 1 second each)
+- Workflows with clear logical phases (research → analysis → writing)
+
+**Implementation:**
+```python
+# Checkpoint at phase boundaries
+graph.add_node("research_phase", research_subgraph)  # Multiple nodes inside
+graph.add_node("checkpoint_research", checkpoint_node)
+graph.add_node("writing_phase", writing_subgraph)
+graph.add_node("checkpoint_writing", checkpoint_node)
+
+graph.add_edge("research_phase", "checkpoint_research")
+graph.add_edge("checkpoint_research", "writing_phase")
+graph.add_edge("writing_phase", "checkpoint_writing")
+```
+
+**Pros:**
+- Lower checkpoint overhead (fewer I/O operations)
+- Aligns with natural workflow boundaries
+- Reduces storage costs
+
+**Cons:**
+- More progress lost on failure (entire phase may re-run)
+- Less granular recovery
+
+**Rule of Thumb:** Checkpoint per-phase when:
+- Individual nodes are fast (< 5 seconds)
+- Workflow is deterministic (re-running a phase produces same result)
+- Cost optimization is a priority
+
+---
+
+#### **Adaptive Checkpointing (Smart)**
+
+**When to Use:** Production systems where workflow characteristics vary by task.
+
+**Implementation:**
+```python
+def should_checkpoint(state: AgentState, node_metadata: dict) -> bool:
+    """Decide whether to checkpoint based on context"""
+    # Checkpoint if enough time has passed
+    if time.time() - state.get("last_checkpoint_time", 0) > 60:
+        return True
+    
+    # Checkpoint if state size grew significantly
+    if state_size(state) > state.get("last_checkpoint_size", 0) * 1.5:
+        return True
+    
+    # Checkpoint before expensive operations
+    if node_metadata.get("estimated_cost", 0) > 0.10:  # > $0.10
+        return True
+    
+    # Checkpoint before HITL nodes
+    if node_metadata.get("requires_human", False):
+        return True
+    
+    return False
+```
+
+**Best Practice:** Combine time-based + event-based triggers for robust checkpointing.
+
+---
+
+### Rehydration Rules: Rebuilding State from Persistence
+
+When recovering a workflow, you must reconstruct working state from:
+1. The last checkpoint (snapshot)
+2. Events since checkpoint
+3. Memory pointers (which reference external memory store)
+
+#### **Rehydration Algorithm**
+
+```python
+def rehydrate_state(task_id: str) -> AgentState:
+    """
+    Rebuild working state from checkpoint + events + memory hydration.
+    """
+    # Step 1: Load last checkpoint
+    checkpoint = load_checkpoint(task_id)
+    if not checkpoint:
+        # No checkpoint — start fresh
+        state = initialize_empty_state(task_id)
+        checkpoint_time = 0
+    else:
+        state = checkpoint["state_snapshot"]
+        checkpoint_time = checkpoint["timestamp"]
+        
+        # Step 1a: Validate schema version
+        if checkpoint["schema_version"] != CURRENT_SCHEMA_VERSION:
+            state = migrate_state_schema(
+                state,
+                from_version=checkpoint["schema_version"],
+                to_version=CURRENT_SCHEMA_VERSION
+            )
+    
+    # Step 2: Replay events since checkpoint
+    events = event_store.get_events_after(task_id, after_timestamp=checkpoint_time)
+    for event in events:
+        state = apply_event(state, event)
+    
+    # Step 3: Hydrate memory pointers
+    if "episodic_refs" in state and state["episodic_refs"]:
+        # Fetch full memory objects from IDs
+        state["_episodic_cache"] = memory_store.fetch_episodes(
+            state["episodic_refs"]
+        )
+    
+    if "procedural_refs" in state and state["procedural_refs"]:
+        state["_procedural_cache"] = memory_store.fetch_procedures(
+            state["procedural_refs"]
+        )
+    
+    # Step 4: Rebuild derived state (optional)
+    # Example: Recompute context_summary from messages
+    if "messages" in state and len(state["messages"]) > 20:
+        state["context_summary"] = summarize_messages(state["messages"])
+    
+    # Step 5: Validate state integrity
+    validate_state_schema(state)  # Ensure all required fields present
+    
+    return state
+```
+
+#### **Rehydration Rules**
+
+1. **Always validate schema version** → If checkpoint was saved with an older schema, migrate before use
+2. **Memory pointers must be dereferenced** → IDs alone are useless; fetch full objects
+3. **Derived fields must be recomputed** → Don't trust computed fields from old checkpoints (e.g., summaries)
+4. **Handle missing memories gracefully** → If a memory pointer references a deleted memory, log warning and continue
+5. **Replay events in order** → Event order matters; timestamps ensure correct sequencing
+
+#### **Hydration Cache Pattern**
+
+```python
+# Don't put full memory objects in state
+class AgentState(TypedDict):
+    episodic_refs: list[str]  # IDs only (persisted)
+    _episodic_cache: dict     # Full objects (transient, not checkpointed)
+
+# Hydrate on-demand
+def get_episodic_memories(state: AgentState) -> list[dict]:
+    if "_episodic_cache" not in state or not state["_episodic_cache"]:
+        # Cache miss — hydrate from memory store
+        state["_episodic_cache"] = memory_store.fetch(state["episodic_refs"])
+    return state["_episodic_cache"]
+```
+
+**Why This Works:** Checkpoints store only IDs (small), transient cache holds full objects (never persisted).
+
+---
+
+### Schema Versioning & Migration
+
+As your agent evolves, state schemas change. Without versioning, old checkpoints become unreadable.
+
+#### **Versioning Strategy**
+
+1. **Embed version in every checkpoint:**
+   ```python
+   checkpoint = {
+       "schema_version": "v2.1.0",  # Semantic versioning
+       "state_snapshot": state,
+       # ...
+   }
+   ```
+
+2. **Define migration functions:**
+   ```python
+   def migrate_v1_to_v2(state: dict) -> dict:
+       """Migrate from v1.x to v2.x"""
+       # v2 added 'retry_count' field
+       if "retry_count" not in state:
+           state["retry_count"] = 0
+       
+       # v2 renamed 'docs' to 'retrieved_docs'
+       if "docs" in state:
+           state["retrieved_docs"] = state.pop("docs")
+       
+       return state
+   
+   MIGRATIONS = {
+       ("v1.0.0", "v2.0.0"): migrate_v1_to_v2,
+       ("v2.0.0", "v2.1.0"): migrate_v2_to_v2_1,
+   }
+   ```
+
+3. **Apply migrations on rehydration:**
+   ```python
+   def migrate_state_schema(state: dict, from_version: str, to_version: str) -> dict:
+       """Apply all migrations between versions"""
+       current_version = from_version
+       
+       while current_version != to_version:
+           # Find next migration
+           migration_fn = MIGRATIONS.get((current_version, to_version))
+           if not migration_fn:
+               raise ValueError(f"No migration path from {current_version} to {to_version}")
+           
+           state = migration_fn(state)
+           current_version = to_version  # Simplified; real impl chains migrations
+       
+       return state
+   ```
+
+#### **Schema Evolution Guidelines**
+
+**✅ Safe Changes (Backward Compatible):**
+- Adding new optional fields with defaults
+- Adding new event types
+- Expanding enum values
+
+**⚠️ Requires Migration:**
+- Renaming fields
+- Changing field types
+- Removing fields
+- Changing field semantics
+
+**❌ Dangerous (Avoid):**
+- Changing the meaning of existing fields without migration
+- Breaking changes without version bump
+
+#### **Practical Migration Tips**
+
+1. **Test migrations with real checkpoints** → Don't wait until production breaks
+2. **Support N-1 schema versions** → Allow one-step upgrades
+3. **Log migration events** → Track which checkpoints were migrated
+4. **Archive old checkpoints** → After migrating, keep originals for rollback
+5. **Document breaking changes** → Changelog for schema versions
+
+**Example Changelog:**
+```
+v2.1.0 (2025-12-25)
+- Added: 'context_summary' field for message compression
+- Migration: No action needed (optional field with default)
+
+v2.0.0 (2025-12-01)
+- Breaking: Renamed 'docs' → 'retrieved_docs'
+- Breaking: Added required 'retry_count' field (defaults to 0)
+- Migration: Run migrate_v1_to_v2 on v1.x checkpoints
+```
+
+---
+
+### Checkpoint Storage Best Practices
+
+#### **Storage Backends**
+
+| Backend | Best For | Pros | Cons |
+|---------|----------|------|------|
+| **PostgreSQL/MySQL** | Production multi-agent systems | ACID guarantees, queryable, relational | Setup overhead |
+| **MongoDB/DynamoDB** | Flexible schemas, high write volume | Schema-less, scalable | Eventual consistency |
+| **Redis** | Ephemeral checkpoints, caching | Blazing fast | Not durable (use persistence mode) |
+| **S3/GCS/Azure Blob** | Large state objects, archival | Cheap, infinite scale | Higher latency |
+| **Local Files** | Development, single-machine | Zero setup | Not production-ready |
+
+**Recommendation:** Use database (Postgres/Mongo) for active checkpoints, archive to object storage (S3) after task completion.
+
+#### **Checkpoint Cleanup Policy**
+
+```python
+def prune_old_checkpoints(task_id: str, keep_last_n: int = 5):
+    """Keep only the N most recent checkpoints per task"""
+    checkpoints = db.checkpoints.find(
+        {"task_id": task_id},
+        sort=[("timestamp", -1)]
+    )
+    
+    to_archive = list(checkpoints)[keep_last_n:]
+    
+    for ckpt in to_archive:
+        # Move to cold storage
+        archive_to_s3(ckpt)
+        # Delete from active DB
+        db.checkpoints.delete_one({"id": ckpt["id"]})
+```
+
+**Rule:** Keep last 3-5 checkpoints in hot storage, archive the rest.
+
+---
+
+### Implementation Checklist
+
+Before deploying checkpoint/replay logic:
+
+- [ ] Persistence strategy chosen (snapshot, event sourcing, or hybrid)
+- [ ] Checkpoint cadence defined (per-node, per-phase, or adaptive)
+- [ ] Schema versioning implemented (version field + migration functions)
+- [ ] Rehydration logic handles memory pointer dereferencing
+- [ ] Migration tests written for schema changes
+- [ ] Checkpoint cleanup/archival policy defined
+- [ ] Recovery tested (can successfully resume from checkpoints)
+- [ ] Event replay tested (events produce correct state transitions)
+- [ ] Failure scenarios tested (checkpoint corruption, missing memories)
+- [ ] Monitoring added (checkpoint success rate, recovery time)
+
+---
+
+**Remember:** Persistence is insurance against failure. Checkpoint conservatively early in development, optimize cadence as you understand failure modes. The best checkpoint strategy is the one you test before you need it.
 
 ⸻
 
