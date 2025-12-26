@@ -1,5 +1,7 @@
 # AI Agent Build Guide — Basic → Kick-Ass (Enhanced Edition)
 
+![Agent Orchestrator Architecture](attachment:1)
+
 A step-by-step playbook for building AI agents in four tiers of increasing power. This enhanced edition integrates educational structure inspired by academic frameworks like Great Learning — including Learning Objectives, Concept Capsules, Reflection Prompts, and Build Labs — while retaining full engineering rigor.
 
 ⸻
@@ -4499,6 +4501,8 @@ class Tier2Agent:
 ⸻
 
 ## Tier 3 · Advanced Agent (Multi-Agent + Planning + Observability)
+
+![Agent Orchestrator - Agent Control Hub](attachment:1)
 
 **Concept Capsule:**
 
