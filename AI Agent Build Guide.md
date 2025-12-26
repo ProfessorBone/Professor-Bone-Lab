@@ -2757,6 +2757,8 @@ Before deploying observability instrumentation:
 
 ⸻
 
+![Multi-Agent System](images/multiAgent.jpeg)
+
 ## Multi-Agent State Contracts & Handoff Validation
 
 **Concept Capsule:**
