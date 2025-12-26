@@ -653,6 +653,8 @@ How would the Week 9 notebook implementation change if the PEAS Environment was 
 
 ⸻
 
+![Agent Memory Architecture](images/agent_memory.png)
+
 ## Memory Architecture: The Complete Picture
 
 Now that you understand schemas and the build workflow, let's see how memory flows through an agentic system. Memory isn't a single thing — it's a hierarchy from persistent knowledge to moment-to-moment working memory.
