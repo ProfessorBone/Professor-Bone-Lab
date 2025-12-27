@@ -653,7 +653,7 @@ How would the Week 9 notebook implementation change if the PEAS Environment was 
 
 ⸻
 
-![Agent Memory Architecture](images/agent_memory.png)
+![Agent Memory Architecture](images/agent_orchestrator_architecture.jpeg)
 
 ## Memory Architecture: The Complete Picture
 
