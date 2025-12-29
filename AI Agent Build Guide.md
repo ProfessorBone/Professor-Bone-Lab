@@ -66,6 +66,7 @@ The AGI Architecture Blueprint, 9-Phase Roadmap, and Systems Diagrams are advanc
 • Memory Lifecycle & Anti-Bloat Patterns
 • State Persistence: Checkpoints, Event Logs, and Replay
 • Observability: Mapping State Updates to Telemetry (Without State Dumps)
+• System Prompt Architecture: Modular Prompt Blocks + State Integration
 • Multi-Agent State Contracts & Handoff Validation
 • State Safety: PII, Retention, and Redaction
 • Tier 0 · Prereqs & Principles
@@ -2757,6 +2758,273 @@ Before deploying observability instrumentation:
 
 ⸻
 
+## System Prompt Architecture: Modular Prompt Blocks + State Integration
+
+**Concept Capsule:**
+The system prompt is not merely "instructions to the LLM"—it is a first-class architectural component that must be co-designed with your state schema, orchestration routes, and tool contracts. This module upgrades system prompts from ad-hoc text to engineered artifacts: modular, versioned, testable, and tightly coupled with agent state.
+
+**Learning Objectives**
+• Understand how system prompts are reconstructed per LLM call within the context window
+• Apply the six modular blocks architecture (Identity, Capabilities, Constraints, Policy/Routing, Context, Format)
+• Co-design prompts and state schemas using explicit placeholder contracts
+• Implement anti-bloat patterns: store pointers in state, compute summaries at injection time
+• Version and test prompts like production code
+
+---
+
+### The Architectural Reality: Prompts Are Reconstructed Per Call
+
+**Critical Fact:** LLMs have no persistent internal memory across API calls. What appears as "memory" in conversations is actually the context window—a reconstructed package sent with every request.
+
+**The Context Window Contains Four Distinct Components:**
+
+1. **System Prompt (Stable Core)** — Identity, constraints, policy, capabilities guidance, output format norms
+2. **Messages (Conversation Trace)** — Running interaction history or summaries (often stored in state)
+3. **Injected Context (Dynamic)** — Retrieved docs, task phase, user prefs, current state highlights
+4. **Tool Schema** — Function specs, tool affordances, input/output structure
+
+**Implication for Design:**
+Because context is reconstructed every call:
+- Persistence lives in the orchestrator (state + memory stores), not the LLM
+- The system prompt is re-injected each call as part of context assembly
+- State changes must be reflected in context updates (via injection)
+- Bloated prompts waste tokens on every call—keep them lean
+
+**Design Heuristic:** Keep the system prompt stable and minimal; push dynamic task content into injected context blocks.
+
+This section synthesizes patterns from system_prompt_architecture.md.
+
+---
+
+### The Six Modular Blocks Architecture
+
+Rather than writing prompts as monolithic text, decompose them into six functional blocks. This modular structure improves maintainability, testability, and tool reliability.
+
+#### **Block 1: Identity**
+
+**Purpose:** Establishes who the agent is and how it communicates.
+
+**What Goes Here:**
+- Role definition ("You are a Research Assistant")
+- Domain expertise ("You specialize in financial analysis")
+- Communication style ("Be concise and professional")
+- Non-negotiable identity invariants ("You work for Company X")
+
+**Example:**
+```
+You are a Research Assistant specializing in scientific literature review.
+Your tone: clear, structured, and academically rigorous.
+Your default: provide evidence-based answers with citations.
+```
+
+---
+
+#### **Block 2: Capabilities**
+
+**Purpose:** Defines what the agent can do and what tools exist.
+
+**What Goes Here:**
+- Available tools and their intended use
+- Tool input/output expectations
+- High-level tool selection criteria
+
+**Example:**
+```
+You can use these tools when needed:
+- web_search: Query the web for current information
+- retrieve_docs: Search internal knowledge base
+- calculate: Perform mathematical calculations
+
+Prefer direct answers when confident. Use tools when:
+- Answer requires current/external information
+- Calculations are needed for accuracy
+- Internal documentation must be consulted
+```
+
+---
+
+#### **Block 3: Constraints**
+
+**Purpose:** Defines boundaries and safety rails.
+
+**What Goes Here:**
+- Prohibited actions
+- Refusal protocols
+- Operational constraints (limits, scope boundaries)
+- Compliance guardrails
+
+**Example:**
+```
+Constraints:
+- Stay within scope: financial analysis only
+- Do not fabricate sources or data
+- Refuse requests for financial advice (refer to licensed advisor)
+- Maximum 5 tool calls per task
+- If uncertain, say so and propose next steps
+```
+
+---
+
+#### **Block 4: Policy / Routing**
+
+**Purpose:** Makes routing explicit—what to do next, when, and why.
+
+**This block prevents the prompt from relying on "implied behavior."**
+
+**What Goes Here:**
+- When to ask clarifying questions
+- When to call tools
+- When to handoff to another agent (multi-agent systems)
+- Stop conditions (when to finalize)
+- Retry rules / fallback modes
+
+**Example:**
+```
+Follow this decision policy:
+1) If requirements are unclear: ask 1-3 targeted questions
+2) If answer depends on external/changing info: use tools
+3) If retrieved evidence is required: retrieve first, then answer
+4) If this is a multi-agent system: delegate to specialist when needed
+5) Stop condition: provide final output when success criteria are met
+```
+
+**Why This Matters:** Without explicit routing policy, agents make inconsistent decisions about tool use, leading to unnecessary API calls or missed opportunities.
+
+---
+
+#### **Block 5: Context (Dynamic Injection)**
+
+**Purpose:** Provides task-relevant information, injected just-in-time.
+
+**What Goes Here (Populated at Runtime):**
+- User preferences (session-scoped)
+- Task phase (turn-scoped)
+- Retrieved evidence (task/turn-scoped)
+- Memory recall results (episodic/procedural pointers)
+
+**Example Template:**
+```
+CONTEXT (Injected at runtime):
+Task phase: {task_phase}
+User expertise level: {user_expertise}
+Relevant retrieved context:
+{retrieved_context}
+Relevant memory:
+{memory_hits}
+```
+
+**Critical Design Rule:** Placeholders like `{task_phase}` MUST map to state fields or computed values. This is where prompt-state co-design becomes critical (see next section).
+
+---
+
+#### **Block 6: Format**
+
+**Purpose:** Specifies output structure and response standards.
+
+**What Goes Here:**
+- JSON schema / markdown shape
+- Citation requirements
+- Confidence / uncertainty conventions
+- "No extra text" constraints (if structured output required)
+
+**Example:**
+```
+FORMAT:
+Return output as JSON matching this schema:
+{
+  "answer": string,
+  "citations": array of strings,
+  "confidence": number (0.0-1.0)
+}
+Do not include extra text outside this JSON structure.
+```
+
+---
+
+### Prompt ↔ State Co-Design: The Contract Approach
+
+**The Coordination Problem:**
+If the prompt references `{user_expertise}` but state does not contain `user_expertise`, the system becomes unreliable.
+
+**Key Point:** Prompts and state schemas are coupled artifacts. They must be designed together.
+
+#### **Core Design Heuristics**
+
+**Heuristic 1:** Design prompt + state in the same session. Don't write prompts in isolation.
+
+**Heuristic 2:** Every `{placeholder}` must map to a state field or a computed injection product.
+
+**Heuristic 3:** Every behaviorally significant state value must have corresponding prompt guidance.
+
+#### **The Anti-Bloat Rule (Strong Form)**
+
+If a value exists only to render a prompt, compute it at injection-time instead of storing it in persistent state.
+
+**Examples:**
+- ✅ Store: `retrieved_doc_ids`, `tool_results_refs`, `memory_ids` (pointers)
+- ✅ Compute at injection: `retrieved_doc_summaries`, `ranked_snippets`, `context_block_text`
+- ❌ Avoid storing: full raw document chunks in persistent state (unless cross-node reuse requires it)
+
+**This is how you keep state from becoming a garbage dump.**
+
+#### **Example: Prompt-State Contract Table**
+
+| Placeholder | Source | Required? | Population Mechanism | Failure Behavior |
+|-------------|--------|-----------|---------------------|------------------|
+| `{task_phase}` | `state.task_phase` | Yes | Updated by router/orchestrator | Hard fail before LLM call |
+| `{user_expertise}` | `state.user_expertise` | No | Session init (default: "intermediate") | Use default value |
+| `{retrieved_context}` | Computed | No | Rank → summarize top-k from `state.doc_ids` | Empty block allowed |
+| `{episodic_hits}` | Computed | No | Memory query using `state.query` → return top hits | Empty block allowed |
+
+**Invariants:**
+- `task_phase` ∈ {planning, researching, synthesizing, complete}
+- Tool calls must be recorded as events and optionally referenced by IDs in state
+
+---
+
+### Why Modular Prompts Matter for Tool Reliability
+
+**Problem:** Monolithic prompts become unmanageable as systems grow.
+
+**Benefits of Modular Architecture:**
+
+1. **Maintainability** — Update one block without breaking others (change tool list without touching constraints)
+2. **Testing** — Test each block independently ("Does it refuse correctly?" vs "Does it format correctly?")
+3. **Versioning** — Track changes to specific blocks in version control
+4. **Consistency** — Reuse Identity/Constraints across multiple agents while varying Capabilities
+5. **Tool Discipline** — Explicit Capabilities + Policy blocks reduce unnecessary tool calls
+6. **Multi-Agent Clarity** — Each agent gets role-specific Identity/Capabilities, shared Constraints/Format
+
+**Real-World Impact:**
+Systems using modular prompts with explicit routing policy show:
+- Reduced unnecessary tool calls (fewer wasted API costs)
+- Improved refusal accuracy (explicit constraints)
+- Faster debugging ("which block is failing?")
+- Safer iteration (change one block, regression test others)
+
+---
+
+### Implementation Checklist
+
+Before deploying a system prompt:
+
+- [ ] Identity block is stable and clear
+- [ ] Capabilities describe tools + usage criteria
+- [ ] Constraints are non-negotiable and auditable
+- [ ] Policy/Routing defines tool use, clarifications, handoffs, stop conditions
+- [ ] Context is injected just-in-time and bounded
+- [ ] Format matches output schema exactly
+- [ ] Prompt-state placeholders have a defined contract
+- [ ] Anti-bloat rule enforced: compute injection-only values, store pointers in state
+- [ ] Prompts stored in version control (treat like code)
+- [ ] Regression test suite exists for prompt changes
+
+---
+
+**Key Takeaway:** System prompts are not just text—they are architectural components that must be engineered with the same rigor as state schemas and orchestration logic. The six-block structure + prompt-state contracts + anti-bloat patterns form the foundation for reliable, maintainable agent systems.
+
+⸻
+
 ![Multi-Agent System](images/multiAgent.jpeg)
 
 ## Multi-Agent State Contracts & Handoff Validation
@@ -4368,6 +4636,9 @@ The simplest agent can already act. It receives structured input, reasons about 
    Specify your agent's environment explicitly before coding. This ensures the tools and logic you build match its real operating context.
 2. **Design input/output schema** (Pydantic/JSON).
 3. **Write system prompt** with rules and tone.
+   - **For simple single-tool agents:** Use Appendix A1 (Compact System Prompt) as your starting template.
+   - **For agents with tools/state or when complexity grows:** Use the modular blocks approach in "System Prompt Architecture: Modular Prompt Blocks + State Integration" section and reference Appendix A1b (Modular System Prompt Template).
+   - **Note:** Appendix A1 is sufficient for Tier 0/Tier 1 baseline, but A1b is recommended when tool/state complexity increases.
 4. **Implement one tool** with strict type validation.
 5. **Build ground-truth examples** for testing.
 6. **Run inference**, validate JSON, retry once if needed.
@@ -4789,6 +5060,84 @@ Follow the rules:
 3) Refuse if request is unsafe/out-of-scope; suggest alternatives.
 4) Think step-by-step but return only the final JSON.
 ```
+
+**A1b. Modular System Prompt Template**
+
+This template implements the six-block modular architecture from "System Prompt Architecture: Modular Prompt Blocks + State Integration." Use this when your agent has multiple tools, state management, or complex routing logic.
+
+```
+# IDENTITY
+You are {agent_role}. You help the user accomplish {outcome}.
+Your tone: {tone}. Your default: be clear, structured, and practical.
+
+# CAPABILITIES
+You can use tools when needed. Prefer direct answers when confident.
+Available tools:
+{tool_catalog}
+
+Tool selection guidance:
+- Use {tool_1} when: {tool_1_criteria}
+- Use {tool_2} when: {tool_2_criteria}
+
+# CONSTRAINTS
+- Stay within scope: {scope}
+- Do not fabricate sources or tool results
+- If uncertain, say so and propose a next step
+- If user request is unsafe/out-of-policy, refuse and suggest safe alternatives
+- Maximum {max_tool_calls} tool calls per task
+
+# POLICY / ROUTING
+Follow this decision policy:
+1) If requirements are unclear: ask 1-3 targeted questions
+2) If the answer depends on external or changing info: use tools
+3) If retrieved evidence is required: retrieve first, then answer
+4) If this is a multi-agent system: delegate only when specialist is required
+5) Stop condition: provide final output when success criteria are met
+
+# CONTEXT (Injected at runtime)
+Task phase: {task_phase}
+User expertise level: {user_expertise}
+Relevant retrieved context:
+{retrieved_context}
+Relevant memory:
+{memory_hits}
+
+# FORMAT
+Return output as: {output_format}
+Do not include extra text outside the required format.
+
+# CITATIONS (if applicable)
+When using retrieved information or tool results:
+- Cite sources using [Source: {source_name}] format
+- Include confidence level if uncertain: [Confidence: 0.7]
+```
+
+**Placeholder Population Guide:**
+
+| Placeholder | Example Value | Source |
+|-------------|--------------|--------|
+| `{agent_role}` | "Research Assistant" | Static (defined at agent creation) |
+| `{outcome}` | "provide evidence-based answers" | Static |
+| `{tone}` | "professional and concise" | Static or from `state.communication_style` |
+| `{tool_catalog}` | "web_search, retrieve_docs, calculate" | Static (from tool registry) |
+| `{scope}` | "financial analysis only" | Static |
+| `{max_tool_calls}` | "5" | Static or from `state.limits` |
+| `{task_phase}` | "researching" | `state.task_phase` (Required) |
+| `{user_expertise}` | "intermediate" | `state.user_expertise` (Default if missing) |
+| `{retrieved_context}` | Computed summary | Compute from `state.doc_ids` at injection |
+| `{memory_hits}` | Computed summary | Memory query using `state.query` |
+| `{output_format}` | "JSON with keys: answer, citations, confidence" | Static (from schema) |
+
+**Important Notes:**
+- Placeholders marked "Required" MUST be populated before LLM call (hard fail if missing)
+- Placeholders marked "Compute" should NOT be stored in state—generate them at injection time to prevent bloat
+- Store only pointers (`doc_ids`, `memory_ids`) in state; compute summaries when building context
+- Test prompt changes with regression suite (see Appendix B: Evaluation & Metrics)
+
+**When to Use A1 vs A1b:**
+- **Use A1** for: Tier 0/1 agents, single tool, minimal state, prototyping
+- **Use A1b** for: Tier 2+ agents, multiple tools, state-driven behavior, multi-agent systems
+- **Transition point:** When you find yourself repeatedly editing the compact prompt or adding "special case" logic
 
 **A2. Output JSON Schema (example)**
 ```json
