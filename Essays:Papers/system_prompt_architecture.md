@@ -1,23 +1,32 @@
 # System Prompt Architecture for Agentic AI Systems
 
-## A Practitioner's Framework for Modular Prompt Design and State Integration
+## A Practitioner's Framework for Modular Prompt Design, Routing Policy, and State Integration
 
 ---
 
-**Author:** Faheem Siddiqui  
+**Author:** Clarence "Faheem" Downs  
 **Institution:** Johns Hopkins University — Agentic AI Certificate Program  
 **Date:** December 2025  
-**Document Type:** Engineering Handbook (Build Guide Integration Module)
+**Document Type:** Engineering Handbook (Build Guide Integration Module)  
+**Status:** Proposed heuristics (requires validation in your deployment context)
 
 ---
 
 ## Abstract
 
-This document presents a practitioner's framework for designing system prompts in LLM-based agents. Rather than claiming formal theoretical contributions, it offers **engineering heuristics** derived from analysis of publicly documented production systems and integration with the AI Agent Build Guide's established workflow. The framework addresses three practical problems: (1) how to structure system prompts for maintainability, (2) how to coordinate system prompts with agent state schemas, and (3) where system prompt design fits within the 17-step agent build workflow. All recommendations are labeled as proposed heuristics requiring empirical validation in specific deployment contexts. The document is designed as an integration module for the AI Agent Build Guide, providing step-level guidance that the Guide currently lacks for prompt architecture.
+This document presents a practitioner-oriented framework for designing system prompts in LLM-based agent systems. Rather than claiming formal theoretical contributions, it offers engineering heuristics derived from publicly documented production practices and integrated with the AI Agent Build Guide's workflow (state, orchestration, evaluation).
 
-**Keywords:** System Prompt, Prompt Engineering, Agent State, LangGraph, Agentic AI, Build Workflow
+The framework addresses four practical problems:
+1. How to structure system prompts for maintainability and version control
+2. How to coordinate system prompts with agent state schemas (contract-driven design)
+3. How to incorporate routing/policy logic explicitly (tool use, clarifying questions, handoffs, stop conditions)
+4. How to avoid state bloat through disciplined "memory write → pointer replace → prune" patterns
 
-**Scope Limitation:** This framework applies to LLM-based agents using orchestration frameworks like LangGraph. It does not address non-LLM agents, reinforcement learning agents, or systems without explicit system prompts.
+All recommendations are labeled as proposed heuristics requiring empirical validation per system.
+
+**Keywords:** System Prompt, Context Engineering, Prompt Architecture, Agent State, Routing Policy, LangGraph, Agentic AI, Build Workflow
+
+**Scope Limitation:** This framework applies to LLM-based agents orchestrated by workflow frameworks (e.g., LangGraph). It does not cover non-LLM agents, RL agents, or systems without explicit prompt contexts.
 
 ---
 
@@ -25,114 +34,95 @@ This document presents a practitioner's framework for designing system prompts i
 
 ### 1.1 The Problem This Document Addresses
 
-The AI Agent Build Guide provides comprehensive coverage of state management, memory architecture, and orchestration patterns. However, it offers only minimal guidance on system prompt design — a four-line template in Appendix A1:
+The AI Agent Build Guide offers strong coverage of state management, memory architecture, orchestration patterns, and evaluation. However, system prompt design is often reduced to a minimal template (useful for Tier 0), which becomes insufficient when systems require:
+- Multiple tools with selection logic
+- Dynamic behavior based on user context and task phase
+- Multi-agent handoffs and coordination contracts
+- Prompt versioning, A/B testing, and regression safety
+- Tight coupling with state schema and orchestration routes
 
-```
-You are <ROLE>, serving <AUDIENCE>. Your job: <OUTCOME>.
-Follow the rules:
-1) Output must match schema exactly.
-2) Use tools only when needed.
-3) Refuse if request is unsafe/out-of-scope; suggest alternatives.
-4) Think step-by-step but return only the final JSON.
-```
-
-This template is adequate for Tier 0 agents but insufficient for production systems that require:
-
-- Multiple tools with complex selection logic
-- Dynamic behavior based on user context
-- Coordination with state schemas
-- Multi-agent handoff protocols
-- Versioning and A/B testing
-
-This document fills that gap by providing structured guidance for system prompt architecture that integrates with the Build Guide's existing frameworks.
+This module upgrades system prompts from "a string" to a first-class engineered artifact: modular, testable, versioned, and contract-aligned with state and routing.
 
 ### 1.2 What This Document Is (and Is Not)
 
 **This document IS:**
 - An engineering handbook with proposed heuristics
-- An integration module for the AI Agent Build Guide
-- A collection of patterns observed in documented production systems
-- A starting point requiring validation in your specific context
+- A Build Guide integration module for prompt architecture
+- A set of patterns observed in documented systems and frameworks
+- A practical blueprint designed to be implemented and tested
 
 **This document is NOT:**
 - A peer-reviewed academic contribution
-- A formal theory of prompt architecture
-- An empirically validated framework (no controlled experiments were conducted)
-- A replacement for testing in your deployment environment
+- An empirically validated theory of prompt design
+- A replacement for testing and evaluation in your deployment
+- A universal best-practice for all agents and all models
 
 ### 1.3 Methodology and Limitations
 
-The patterns in this document derive from:
-
-1. **Publicly documented system prompts** from Anthropic's Claude system prompt (leaked/published versions), OpenAI's documentation, and open-source agent frameworks
-2. **Engineering blog posts** from LangChain, Letta, and Anthropic (cited where used)
-3. **The author's implementation experience** building agents in the Johns Hopkins Agentic AI program
-4. **Synthesis with the AI Agent Build Guide** to ensure architectural consistency
+This module synthesizes:
+1. Publicly documented agent guidance (notably "context engineering" framing)
+2. Research on long-context behavior (attention/position effects)
+3. Memory-tiering concepts (e.g., memory blocks / paging patterns)
+4. Practical orchestration realities (node prompts, routing policy, tool contracts)
+5. Integration into the Build Guide's 17-step workflow and tier model
 
 **Limitations:**
-- No controlled experiments comparing architectural approaches
-- Survivorship bias: analysis of successful systems, not failed ones
-- Rapidly evolving field: patterns may become outdated
-- Context-dependent: what works for one agent may not generalize
+- No controlled experiments were conducted
+- Survivorship bias (successful systems are documented more than failed ones)
+- Rapidly evolving model behavior and tooling
+- Context-dependent recommendations that must be validated per system
 
 ---
 
 ## 2. Background: What the Research Actually Says
 
-This section summarizes findings from verifiable sources. Claims are attributed; speculation is labeled.
+This section summarizes findings from verifiable sources and labels inferences explicitly.
 
 ### 2.1 Context Engineering vs. Prompt Engineering
 
-Anthropic's engineering team has articulated a shift in framing:
+Modern engineering practice increasingly frames success as **context engineering**: delivering the right information, tools, and framing at the right time (system prompt is only one component).
 
-> "Context engineering [is] the discipline of building dynamic systems that provide the right information and tools to an LLM at the right time, in the right format, and with the right framing for it to successfully accomplish a task."
+**Implication:** System prompt design cannot be separated from:
+- State design
+- Retrieval design
+- Tool schemas
+- Routing policy
+- Evaluation gates
 
-*Source: Anthropic Engineering Blog, "Building Effective Agents," 2024*
+### 2.2 Attention and Position Effects ("Lost in the Middle")
 
-This framing emphasizes that the system prompt is one component of the broader context window, which also includes:
-- Message history
-- Retrieved documents
-- Tool definitions
-- Runtime state
+Long-context models often show degraded recall for information buried in the middle of long inputs.
 
-**Implication for this document:** System prompt design cannot be separated from state design. They must be co-designed.
+**Implication:**
+- Put identity + non-negotiable constraints near the top
+- Put output format + final reminders near the end
+- Keep the middle for examples and dynamic injected context
+- Keep prompts shorter than you think you can get away with
 
-### 2.2 Attention and Position Effects
+### 2.3 Memory Blocks and Paging Patterns
 
-Liu et al. (2023) demonstrated that LLMs exhibit degraded recall for information in the middle of long contexts:
+Memory-tiering patterns ("fast working memory" vs "slow archival memory") inspire a key production idea:
+- Working memory (state) must be bounded and selective
+- Long-term memory stores durable facts, experiences, and procedures
+- Retrieval determines what gets promoted back into working context
 
-> "Performance is often highest when relevant information occurs at the very beginning or end of the input context, and degrades significantly when models must access relevant information in the middle of long contexts."
-
-*Source: Liu et al., "Lost in the Middle: How Language Models Use Long Contexts," arXiv:2307.03172*
-
-**Implication for this document:** Critical instructions (identity, constraints) should be placed at the beginning of the system prompt. Reminders can be placed at the end. Examples and context can occupy the middle.
-
-### 2.3 Memory Blocks (Letta/MemGPT)
-
-Packer et al. (2023) introduced the concept of "memory blocks" — discrete, labeled segments of the context window that agents can read and edit:
-
-> "MemGPT manages different memory tiers... using an LLM-based operating system that pages information between fast and slow memory."
-
-*Source: Packer et al., "MemGPT: Towards LLMs as Operating Systems," arXiv:2310.08560*
-
-The Letta framework (production implementation of MemGPT) uses specific block types:
-- **Core Memory:** Agent identity and user information (analogous to system prompt)
-- **Archival Memory:** Long-term storage (analogous to vector DB)
-- **Recall Memory:** Conversation history (analogous to message state)
-
-**Implication for this document:** The system prompt can be conceptualized as a structured set of blocks with different update frequencies and ownership models.
+**Implication:** Don't treat "logging everything" as "remembering everything." Design a memory lifecycle.
 
 ### 2.4 Multi-Agent Coordination Challenges
 
-Wang et al. (2023) surveyed LLM-based autonomous agents and identified coordination as a key challenge:
+Multi-agent systems amplify failures in:
+- Role ambiguity
+- Handoff format mismatches
+- Shared context overload
+- Tool/authority confusion
+- Lack of stop conditions ("infinite delegation loops")
 
-> "Multi-agent collaboration introduces challenges in role assignment, communication protocols, and shared memory management."
-
-*Source: Wang et al., "A Survey on Large Language Model Based Autonomous Agents," arXiv:2308.11432*
-
-The survey does not quantify failure rates attributable to prompt design (such quantification would require controlled experiments not present in the literature).
-
-**Implication for this document:** Multi-agent systems require explicit role definitions, handoff protocols, and shared context specifications in their system prompts.
+**Implication:** Prompts must include:
+- Role boundaries
+- Handoff protocols
+- Shared-state visibility rules
+- Routing/stop policy in plain language
+- State contracts and validation checks
 
 ---
 
@@ -140,1123 +130,355 @@ The survey does not quantify failure rates attributable to prompt design (such q
 
 ### 3.1 Architectural Reality: Reconstruction Per Call
 
-A critical architectural fact that shapes all design decisions:
+**Fact:** The full context window is reconstructed for every LLM inference call.
 
-> **The context window is reconstructed for every LLM inference call.**
+Therefore:
+1. The LLM has no persistent internal memory across calls
+2. "Persistence" lives in the orchestrator (state + memory stores)
+3. The system prompt is re-injected each call (as part of context assembly)
 
-The Build Guide states this clearly:
+### 3.2 Decomposing "Context" Into Components
 
-> "CONTEXT WINDOW (LLM Working Memory)... RESET EVERY LLM CALL"
-> — AI Agent Build Guide, Memory Architecture diagram
+To avoid confusion, treat the runtime context as four distinct components:
 
-This means:
-1. The system prompt is not "persistent" in any meaningful sense — it is re-injected on every call
-2. State persists in the orchestrator (e.g., LangGraph), not in the LLM
-3. The LLM has no memory of previous calls except what is explicitly included in the context
+**1. System Prompt (Stable Core)**
+- Identity, constraints, policy, capabilities guidance, output format norms
 
-**Architectural diagram (corrected):**
+**2. Messages (Conversation Trace)**
+- Running interaction history or summaries (often stored in state)
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         ORCHESTRATOR (LangGraph)                        │
-│                                                                         │
-│   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │                    PERSISTENT STATE                              │   │
-│   │   • messages: list[BaseMessage]                                  │   │
-│   │   • retrieved_docs: list[str]                                    │   │
-│   │   • task_progress: dict                                          │   │
-│   │   • (other fields per your state schema)                         │   │
-│   └─────────────────────────────────────────────────────────────────┘   │
-│                                    │                                     │
-│                                    │ On each node execution:             │
-│                                    │ 1. Read relevant state fields       │
-│                                    │ 2. Construct context window         │
-│                                    │ 3. Call LLM                         │
-│                                    │ 4. Parse response                   │
-│                                    │ 5. Update state                     │
-│                                    ▼                                     │
-│   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │              CONTEXT WINDOW (Constructed Per Call)               │   │
-│   │                                                                  │   │
-│   │   ┌──────────────────────────────────────────────────────────┐  │   │
-│   │   │  SYSTEM PROMPT                                           │  │   │
-│   │   │  (Loaded from configuration or built by PromptBuilder)   │  │   │
-│   │   └──────────────────────────────────────────────────────────┘  │   │
-│   │   ┌──────────────────────────────────────────────────────────┐  │   │
-│   │   │  MESSAGES (from state.messages)                          │  │   │
-│   │   └──────────────────────────────────────────────────────────┘  │   │
-│   │   ┌──────────────────────────────────────────────────────────┐  │   │
-│   │   │  INJECTED CONTEXT (retrieved docs, current state fields) │  │   │
-│   │   └──────────────────────────────────────────────────────────┘  │   │
-│   │                                                                  │   │
-│   │   → Sent to LLM → Response returned → Context window discarded  │   │
-│   └─────────────────────────────────────────────────────────────────┘   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+**3. Injected Context (Dynamic)**
+- Retrieved docs, task phase, user prefs, current state highlights
 
-### 3.2 Two Axes of Prompt Classification
+**4. Tool Schema**
+- Function specs, tool affordances, input/output structure
 
-The original paper's "static vs. dynamic" dichotomy was too simplistic. System prompt content varies along two independent axes:
-
-**Axis 1: Update Frequency**
-| Category | Update Frequency | Examples |
-|----------|------------------|----------|
-| Stable | Rarely (versioned releases) | Agent identity, safety constraints |
-| Session-scoped | Per session | User preferences loaded at session start |
-| Task-scoped | Per task | Task-specific instructions, retrieved context |
-| Turn-scoped | Per LLM call | Current state values, recent messages |
-
-**Axis 2: Ownership**
-| Owner | Who Controls It | Examples |
-|-------|-----------------|----------|
-| Developer | Engineering team | Identity, constraints, tool definitions |
-| Operator | Deployment configuration | Environment-specific settings |
-| Agent | Agent's own decisions | Self-updated working memory (in Letta-style systems) |
-| User | User input/preferences | Communication style, expertise level |
-
-**Key insight:** Something can be "developer-controlled" but "turn-scoped" (e.g., a prompt that injects different instructions based on current routing state). Something can be "user-controlled" but "stable" (e.g., user preferences set once and rarely changed).
-
-### 3.3 Where the System Prompt Lives (Build-Time vs. Runtime)
-
-The system prompt exists in two forms:
-
-**1. Build-Time Artifact (Configuration)**
-- Stored as files, database records, or code constants
-- Version-controlled alongside application code
-- Subject to review, testing, and deployment pipelines
-
-**2. Runtime Artifact (Constructed Context)**
-- Assembled by the orchestrator before each LLM call
-- May incorporate state values, retrieved context, and conditional logic
-- Discarded after the call completes
-
-**Proposed heuristic:** Treat system prompts like code. Store them in version control. Review changes. Test before deploying. The runtime construction process should be deterministic and reproducible.
+**Heuristic:** Keep the system prompt stable and minimal; push dynamic task content into injected context.
 
 ---
 
-## 4. A Taxonomy of System Prompt Components
+## 4. Prompt Architecture Model: Six Functional Blocks
 
-### 4.1 Methodology Note
+This taxonomy is a pragmatic decomposition, not a claim about the only correct structure.
 
-The following taxonomy emerges from analysis of:
-- Anthropic's published Claude system prompt structure
-- OpenAI's prompt engineering documentation
-- LangChain's agent prompt templates
-- The author's implementation experience
+### Block 1: Identity
 
-This is a **proposed categorization**, not an empirically validated decomposition. Alternative categorizations are valid.
+**Purpose:** Establishes who the agent is and how it communicates.
+- Role definition
+- Domain expertise
+- Communication style + collaboration posture
+- Non-negotiable identity invariants
 
-### 4.2 Five Functional Categories
+### Block 2: Capabilities
 
-Rather than claiming seven (or four) distinct "components," this revision proposes five **functional categories** that can overlap and be combined:
+**Purpose:** Defines what the agent can do and what tools exist.
+- Available tools and intended use
+- Tool input/output expectations
+- Tool selection criteria (high-level)
 
-#### Category 1: Identity Block
-**Purpose:** Establishes who the agent is.
+### Block 3: Constraints
 
-**Contents:**
-- Role definition ("You are a...")
-- Expertise domain
-- Communication style
-- Relationship to user
-
-**Characteristics:**
-- Typically stable (changes with agent version, not per-task)
-- Developer-owned
-- Should appear early in the prompt (position effects)
-
-**Example:**
-```
-You are a research assistant specializing in AI and machine learning. 
-You communicate in a professional but accessible style, explaining 
-technical concepts clearly. You work collaboratively with the user, 
-asking clarifying questions when needed.
-```
-
-**Build Guide Integration:** This corresponds to defining your agent's PEAS Performance criteria — what does success look like for this agent's role?
-
-#### Category 2: Capabilities Block
-**Purpose:** Defines what the agent can do.
-
-**Contents:**
-- Available tools and their purposes
-- Tool selection guidance
-- Expected tool inputs/outputs
-- Conditions for tool use
-
-**Characteristics:**
-- Stable at the tool level, but tool selection logic may be task-scoped
-- Developer-owned (tool definitions) with agent execution
-- Critical for reliable tool use
-
-**Example:**
-```
-You have access to the following tools:
-
-1. web_search: Search the web for current information.
-   - Use when: User asks about recent events, current data, or information 
-     that may have changed since your training.
-   - Do not use when: Question is about stable historical facts or 
-     concepts you can explain from training.
-   - Input: Search query (1-6 words optimal)
-   - Output: List of search results with snippets
-
-2. retrieve_docs: Search the internal knowledge base.
-   - Use when: User asks about company-specific information, policies, 
-     or previously uploaded documents.
-   - Input: Natural language query
-   - Output: Relevant document chunks with sources
-```
-
-**Build Guide Integration:** This corresponds to PEAS Actuators — the actions your agent can take. Tool definitions should be designed alongside the Tool Schemas in Phase 2, Step 9.
-
-#### Category 3: Constraints Block
 **Purpose:** Defines boundaries and safety rails.
-
-**Contents:**
 - Prohibited actions
-- Content policies
-- Operational limits (e.g., max tool calls)
 - Refusal protocols
+- Operational constraints (limits, scope boundaries)
+- Compliance guardrails (if applicable)
 
-**Characteristics:**
-- Should be highly stable (changes require careful review)
-- Developer-owned with organizational oversight
-- Should appear early in the prompt (priority via position)
+### Block 4: Policy / Routing (NEW)
 
-**Example:**
-```
-CONSTRAINTS:
-- Never provide medical, legal, or financial advice as if you were 
-  a licensed professional. Recommend consulting appropriate experts.
-- Do not generate content that could be used to harm individuals.
-- If you cannot complete a task, explain why and suggest alternatives.
-- Maximum 3 consecutive tool calls without user confirmation.
-- If a request seems to violate these constraints, decline politely 
-  and explain your reasoning without lecturing.
-```
+**Purpose:** Makes routing explicit: what to do next, when, and why.
+- When to ask clarifying questions
+- When to call tools
+- When to handoff to another agent
+- Stop conditions (when to finalize)
+- Retry rules / fallback modes
 
-**Build Guide Integration:** Constraints inform your routing logic in Phase 3 — the orchestrator should enforce operational limits that the prompt declares.
+This block prevents the prompt from relying on "implied behavior."
 
-#### Category 4: Context Block
-**Purpose:** Provides task-relevant information.
+### Block 5: Context (Dynamic Injection)
 
-**Contents:**
-- Retrieved documents
-- User preferences
-- Session history summaries
-- Current state values
+**Purpose:** Provides task-relevant information, injected just-in-time.
+- User prefs (session-scoped)
+- Task phase (turn-scoped)
+- Retrieved evidence (task/turn-scoped)
+- Memory recall results (episodic/procedural pointers)
 
-**Characteristics:**
-- Highly dynamic (task-scoped or turn-scoped)
-- May be user-owned (preferences) or agent-populated (retrieved docs)
-- Should be populated just-in-time, not stored statically
+### Block 6: Format
 
-**Example:**
-```
-CURRENT CONTEXT:
-- User expertise level: intermediate
-- Retrieved documents: [3 chunks about transformer architecture]
-- Current task: Explain attention mechanisms
-- Session summary: User is building a RAG system and has asked 
-  about embeddings and vector stores in previous turns.
-```
-
-**Build Guide Integration:** Context blocks are populated from your State Schema. Each field in your `AgentState` that gets injected into the prompt should have a corresponding place in the context block.
-
-#### Category 5: Format Block
-**Purpose:** Specifies response structure.
-
-**Contents:**
-- Output format requirements (JSON, markdown, prose)
-- Length guidelines
-- Structural requirements (sections, citations)
-- Examples of expected output
-
-**Characteristics:**
-- Typically stable per node (different nodes may have different formats)
-- Developer-owned
-- Should appear late in the prompt (close to where generation begins)
-
-**Example:**
-```
-OUTPUT FORMAT:
-Respond with a JSON object matching this schema:
-{
-  "answer": "Your response to the user's question",
-  "sources": ["List of sources used, if any"],
-  "confidence": 0.0-1.0,
-  "needs_clarification": true/false
-}
-
-Do not include any text outside the JSON object.
-```
-
-**Build Guide Integration:** Format blocks must align with your Node Output Schemas (Phase 2, Step 9). If you define a Pydantic model for structured output, your format block should describe that schema.
-
-### 4.3 The Relationship Between Categories
-
-These categories are **not mutually exclusive**. A single prompt section might serve multiple purposes:
-
-```
-You are a research assistant (IDENTITY) who can search the web 
-and retrieve documents (CAPABILITIES). Always cite your sources 
-(FORMAT) and never provide medical advice (CONSTRAINTS).
-```
-
-The categories are a **lens for analysis**, not a rigid template. Use them to ensure you've covered necessary functions, not as mandatory sections.
+**Purpose:** Specifies output structure and response standards.
+- JSON schema / markdown shape
+- Citation requirements
+- Confidence / uncertainty conventions
+- "No extra text" constraints (if structured output required)
 
 ---
 
-## 5. Coordinating System Prompts with State Schemas
+## 5. Prompt ↔ State Co-Design (and How to Avoid State Bloat)
 
 ### 5.1 The Coordination Problem
 
-The original paper introduced a "System Prompt–State Contract" concept. While the term was useful, the formalization was inadequate. This section provides a more precise treatment.
+If the prompt references {user_expertise} but state does not contain user_expertise, the system becomes unreliable.
 
-**The core problem:** The system prompt may reference state fields that must be populated by the orchestrator. If the prompt expects `{user_expertise}` but the state schema doesn't include that field, the agent will malfunction.
+**Key point:** Prompts and state schemas are coupled artifacts.
 
-### 5.2 Proposed Heuristic: Co-Design Prompt and State
+### 5.2 Core Heuristics
 
-**Heuristic 5.2.1:** Define your state schema and system prompt in the same design session. They are coupled artifacts.
+**Heuristic 5.2.1:** Design prompt + state in the same session.
 
-**Heuristic 5.2.2:** For every `{placeholder}` in your system prompt, there must be a corresponding field in your state schema with a defined population mechanism.
+**Heuristic 5.2.2:** Every {placeholder} must map to a state field or a computed injection product.
 
-**Heuristic 5.2.3:** For every state field that affects agent behavior, there should be a corresponding instruction in the system prompt explaining how to use it.
+**Heuristic 5.2.3:** Every behaviorally significant state value must have corresponding prompt guidance.
 
-### 5.3 State Field Reference Patterns
+### 5.3 The Anti-Bloat Rule (STRONG FORM)
 
-When a system prompt references state, it can do so in three ways:
+If a value exists only to render a prompt, compute it at injection-time instead of storing it in persistent state.
 
-**Pattern A: Direct Injection**
+**Examples:**
+- ✅ Store: retrieved_doc_ids, tool_results_refs, memory_ids
+- ✅ Compute at injection: retrieved_doc_summaries, ranked_snippets, context_block_text
+- ❌ Avoid storing: full raw document chunks in persistent state (unless cross-node reuse requires it)
 
-The orchestrator substitutes state values directly into the prompt before sending to the LLM.
-
-```python
-# Orchestrator code
-def build_context(state: AgentState, base_prompt: str) -> str:
-    return base_prompt.format(
-        user_expertise=state["user_expertise"],
-        retrieved_docs=format_docs(state["retrieved_docs"])
-    )
-
-# System prompt template
-"""
-The user's expertise level is: {user_expertise}
-
-Relevant documents:
-{retrieved_docs}
-
-Given this context, answer the user's question.
-"""
-```
-
-**Pattern B: Behavioral Conditioning**
-
-The system prompt instructs the agent to behave differently based on state values, but the values are visible to the agent rather than substituted.
-
-```
-You will receive a context block with the user's expertise level.
-- If expertise is "beginner": Use simple language, define technical terms.
-- If expertise is "intermediate": Use technical terms with brief context.
-- If expertise is "expert": Use domain terminology freely.
-```
-
-**Pattern C: State Query Instructions**
-
-The system prompt instructs the agent to check state values as part of its reasoning process (common in Letta-style architectures with explicit memory tools).
-
-```
-Before responding, use the check_memory tool to retrieve:
-1. User's stated preferences
-2. Summary of previous conversation
-3. Any relevant prior answers on this topic
-
-Incorporate this context into your response.
-```
-
-### 5.4 Anti-Bloat Guardrails
-
-The Build Guide warns against state bloat:
-
-> "If your state schema exceeds 30 fields, you're likely violating the node scratch vs agent state boundary."
-> — AI Agent Build Guide, State Scope & Ownership
-
-System prompt design can exacerbate bloat if not carefully managed.
-
-**Heuristic 5.4.1:** Do not add state fields solely to make them available to the prompt. Only add fields that serve coordination purposes across nodes.
-
-**Heuristic 5.4.2:** Prefer injecting computed summaries over raw data. Instead of injecting 10 retrieved document chunks, inject a pre-computed summary or the top 3 most relevant chunks.
-
-**Heuristic 5.4.3:** Apply the "who reads it?" test. If only the LLM reads a state field (it's never used by orchestrator logic or other nodes), consider whether it should be a state field at all or computed at injection time.
-
-### 5.5 Example: State Schema and Prompt Co-Design
-
-**Step 1: Define State Schema (Build Guide Phase 2, Step 8)**
-
-```python
-class ResearchAgentState(TypedDict):
-    # Core message handling
-    messages: Annotated[list[BaseMessage], add_messages]
-    
-    # Task tracking
-    query: str
-    task_phase: Literal["planning", "researching", "synthesizing", "complete"]
-    
-    # Retrieved context
-    retrieved_docs: list[str]  # Summaries, not full docs
-    doc_sources: list[str]     # Source citations
-    
-    # User context
-    user_expertise: Literal["beginner", "intermediate", "expert"]
-    
-    # Quality tracking
-    confidence: float
-    needs_more_research: bool
-```
-
-**Step 2: Design System Prompt with State References**
-
-```
-# Identity
-You are a research assistant specializing in synthesizing information 
-from multiple sources into clear, well-cited insights.
-
-# Capabilities
-You have access to:
-- web_search: Find current information online
-- retrieve_docs: Search the internal knowledge base
-
-# Context (populated at runtime)
-User expertise level: {user_expertise}
-Current task phase: {task_phase}
-
-Relevant documents:
-{retrieved_docs}
-
-Sources: {doc_sources}
-
-# Behavioral Instructions
-Based on the user's expertise level:
-- beginner: Explain concepts from first principles, avoid jargon
-- intermediate: Assume foundational knowledge, define advanced terms
-- expert: Use domain terminology freely, focus on nuance
-
-Based on the task phase:
-- planning: Identify what information is needed, do not answer yet
-- researching: Use tools to gather information
-- synthesizing: Combine gathered information into a coherent answer
-- complete: Provide final answer with citations
-
-# Format
-Respond with:
-{
-  "reasoning": "Your thought process",
-  "action": "next_step | answer",
-  "content": "Your response or next step description",
-  "confidence": 0.0-1.0,
-  "needs_more_research": true/false
-}
-```
-
-**Step 3: Verify Alignment**
-
-| Prompt Reference | State Field | Population Mechanism |
-|------------------|-------------|---------------------|
-| `{user_expertise}` | `user_expertise` | Set at session start from user profile |
-| `{task_phase}` | `task_phase` | Updated by orchestrator routing logic |
-| `{retrieved_docs}` | `retrieved_docs` | Populated by retrieval node |
-| `{doc_sources}` | `doc_sources` | Populated alongside retrieved_docs |
-
-All references have corresponding fields. Design is aligned.
+This is how you keep state from becoming a garbage dump.
 
 ---
 
-## 6. Integration with the Build Guide Workflow
+## 6. Prompt–State Contract (Artifact You Can Enforce)
 
-### 6.1 The 17-Step Workflow
+Treat the contract like code: it is reviewable, testable, enforceable.
 
-The Build Guide defines a precise build sequence:
+### 6.1 Contract Spec Template
 
-```
-Phase 1: Data Layer (Steps 1-7)
-  1. Define PEAS
-  2. Set up environment
-  3. Load documents
-  4. Configure chunking
-  5. Create embeddings
-  6. Build vector store
-  7. Create retriever
+**Prompt-State Contract**
+- Placeholders
+- Source of truth
+- Population mechanism
+- Required / optional
+- Failure behavior
+- Invariants
 
-Phase 2: Logic Layer (Steps 8-11)
-  8. Initialize LLM
-  9. Define state schema + node functions + tools
-  10. Implement node logic
-  11. Add structured output
+### 6.2 Example Contract (Minimal)
 
-Phase 3: Orchestration (Steps 12-13)
-  12. Build graph with edges
-  13. Add conditional routing
+| Placeholder / Input | Source | Required? | Population Mechanism | Failure Behavior |
+|---------------------|--------|-----------|---------------------|------------------|
+| {task_phase} | state.task_phase | Yes | Updated by router/orchestrator | Hard fail before LLM call |
+| {user_expertise} | state.user_expertise | No | Session init (default: "intermediate") | Default value |
+| {retrieved_context} | computed | No | Rank → summarize top-k from state.doc_ids | Empty block allowed |
+| {episodic_hits} | computed | No | Memory query by state.query → return top hits | Empty block allowed |
 
-Phase 4: Execution (Steps 14-17)
-  14. Compile graph
-  15. Test with sample inputs
-  16. Iterate and refine
-  17. Deploy
-```
-
-### 6.2 Where System Prompt Design Fits
-
-System prompt design is **not a single step** but an activity that spans multiple steps:
-
-| Step | System Prompt Activity |
-|------|----------------------|
-| **Step 1 (PEAS)** | Draft identity block based on Performance criteria; identify capabilities from Actuators |
-| **Step 8 (State Schema)** | Co-design state schema and prompt context block; identify what state values the prompt will reference |
-| **Step 9 (Node Functions)** | Design per-node prompt variations if nodes require different instructions; align format blocks with output schemas |
-| **Step 10 (Node Logic)** | Implement prompt construction in node functions; wire state values to prompt placeholders |
-| **Step 12 (Graph Building)** | Ensure routing logic aligns with prompt's behavioral conditioning (e.g., if prompt says "in planning phase, do X," routing must track phases) |
-| **Step 15 (Testing)** | Test prompt behavior with representative inputs; validate that state injection works correctly |
-| **Step 16 (Iteration)** | Refine prompt based on test failures; add edge case handling |
-
-### 6.3 Prompt Design Checklist by Build Phase
-
-**After Phase 1 (PEAS complete):**
-- [ ] Identity block drafted
-- [ ] Capabilities block outlined (tools identified)
-- [ ] Constraints block drafted (safety requirements from PEAS)
-
-**After Step 8 (State schema defined):**
-- [ ] Context block designed with state field references
-- [ ] Each `{placeholder}` maps to a state field
-- [ ] Population mechanism identified for each referenced field
-
-**After Step 9 (Node functions defined):**
-- [ ] Format block aligned with Pydantic output schemas
-- [ ] Per-node prompt variations documented (if needed)
-- [ ] Tool descriptions in capabilities block match tool implementations
-
-**After Step 12 (Graph built):**
-- [ ] Behavioral conditioning in prompt aligns with routing logic
-- [ ] Phase/state transitions in prompt match graph edges
-
-**After Step 15 (Testing complete):**
-- [ ] Prompt tested with beginner/intermediate/expert user contexts
-- [ ] Edge cases documented and handled in constraints block
-- [ ] Format compliance verified (outputs match schema)
-
-### 6.4 Tier-Appropriate Prompt Complexity
-
-The Build Guide defines four tiers. Prompt complexity should match tier:
-
-**Tier 0 (Single-Path Agent)**
-- Simple identity + single tool description
-- Minimal constraints (basic safety)
-- No context block (no state beyond messages)
-- Use the Appendix A1 template from Build Guide
-
-**Tier 1 (RAG Agent with Branching)**
-- Identity block with expertise domain
-- Multiple tool descriptions with selection guidance
-- Constraints including when to retrieve vs. respond directly
-- Context block with retrieved documents
-- Format block for structured output
-
-**Tier 2 (Multi-Agent System)**
-- Role-specific identity per agent
-- Capabilities scoped to agent's responsibilities
-- Handoff protocols in constraints block
-- Shared context block for inter-agent state
-- Format blocks standardized across agents for interoperability
-
-**Tier 3 (Constitutional Agent)**
-- Full identity with ethical principles
-- Comprehensive capabilities with meta-tools (planning, reflection)
-- Extensive constraints with reasoning requirements
-- Dynamic context with episodic memory integration
-- Format blocks for different output types (plans, reflections, answers)
+**Invariants**
+- task_phase ∈ {planning, researching, synthesizing, complete}
+- Tool calls must be recorded as events and optionally referenced by IDs in state
 
 ---
 
-## 7. Multi-Agent Prompt Considerations
+## 7. System Prompt Templates (Modular)
 
-### 7.1 Scope Limitation
+Below is a modular template that matches the six-block architecture.
 
-This section covers only the **hierarchical (supervisor-worker)** pattern referenced in the Build Guide. Other patterns (decentralized, blackboard) require different approaches not covered here.
-
-### 7.2 Supervisor Agent Prompt Structure
-
-The supervisor's prompt must include:
-
-**Worker Registry:**
-```
-You coordinate the following specialist agents:
-1. Researcher: Finds and summarizes information
-   - Invoke when: User question requires external information
-   - Expects: Clear research question
-   - Returns: Summary with sources
-
-2. Writer: Drafts and refines text
-   - Invoke when: Information is gathered and needs synthesis
-   - Expects: Source material and target format
-   - Returns: Polished text
-
-3. Critic: Reviews and improves outputs
-   - Invoke when: Draft is complete and needs quality check
-   - Expects: Draft text and quality criteria
-   - Returns: Feedback and suggestions
-```
-
-**Delegation Protocol:**
-```
-When you receive a user request:
-1. Analyze what capabilities are needed
-2. Decompose into subtasks if necessary
-3. Delegate to appropriate worker(s)
-4. Synthesize worker outputs into final response
-5. If worker output is insufficient, provide feedback and re-delegate
-
-You do NOT perform research or writing yourself — you coordinate workers.
-```
-
-**Handoff Format:**
-```
-When delegating to a worker, provide:
-{
-  "worker": "worker_name",
-  "task": "Clear description of what to do",
-  "context": "Relevant information the worker needs",
-  "success_criteria": "How to know when task is complete"
-}
-```
-
-### 7.3 Worker Agent Prompt Structure
-
-Worker prompts must include:
-
-**Scope Boundaries:**
-```
-You are the Researcher in a multi-agent system.
-
-YOUR RESPONSIBILITIES:
-- Search for information using web_search and retrieve_docs tools
-- Evaluate source quality
-- Summarize findings with citations
-
-NOT YOUR RESPONSIBILITIES:
-- Making final decisions about user requests
-- Writing polished final outputs
-- Coordinating other agents
-
-If a task falls outside your responsibilities, say so and return 
-control to the supervisor.
-```
-
-**Input/Output Contract:**
-```
-You will receive tasks in this format:
-{
-  "task": "What to research",
-  "context": "Background information",
-  "success_criteria": "What constitutes complete research"
-}
-
-Respond in this format:
-{
-  "status": "complete | needs_more_info | out_of_scope",
-  "findings": "Summary of what you found",
-  "sources": ["List of sources"],
-  "confidence": 0.0-1.0,
-  "notes_for_supervisor": "Any issues or recommendations"
-}
-```
-
-### 7.4 Shared State Considerations
-
-In multi-agent systems, the shared coordination state (Build Guide Section on State Scope) must be referenced in prompts:
+### 7.1 Base System Prompt (Composable)
 
 ```
-SHARED CONTEXT (visible to all agents):
-- User query: {user_query}
-- Current phase: {current_phase}
-- Completed subtasks: {completed_subtasks}
-- Pending approvals: {pending_approvals}
+# IDENTITY
+You are {agent_role}. You help the user accomplish {outcome}.
+Your tone: {tone}. Your default: be clear, structured, and practical.
 
-Do not duplicate work that has already been completed. Check 
-completed_subtasks before beginning new work.
-```
+# CAPABILITIES
+You can use tools when needed. Prefer direct answers when confident.
+Available tools:
+{tool_catalog}
 
-**Heuristic 7.4.1:** Each agent's prompt should reference only the shared state fields that agent needs. Do not inject the entire shared state into every prompt.
+# CONSTRAINTS
+- Stay within scope: {scope}
+- Do not fabricate sources or tool results.
+- If uncertain, say so and propose a next step.
+- If user request is unsafe/out-of-policy, refuse and suggest safe alternatives.
 
----
+# POLICY / ROUTING
+Follow this decision policy:
+1) If requirements are unclear: ask 1–3 targeted questions.
+2) If the answer depends on external or changing info: use tools.
+3) If retrieved evidence is required: retrieve first, then answer.
+4) If this is a multi-agent system: delegate only when a specialist is required.
+5) Stop condition: provide final output when success criteria are met.
 
-## 8. Practical Implementation Patterns
+# CONTEXT (Injected at runtime)
+Task phase: {task_phase}
+User preferences: {user_prefs}
+Relevant retrieved context:
+{retrieved_context}
+Relevant episodic/procedural memory hits:
+{memory_hits}
 
-### 8.1 Prompt Storage and Loading
-
-**Pattern A: File-Based Storage**
-```
-prompts/
-├── base/
-│   ├── identity.md
-│   ├── constraints.md
-│   └── format.md
-├── agents/
-│   ├── researcher.md
-│   ├── writer.md
-│   └── supervisor.md
-└── nodes/
-    ├── planning_node.md
-    ├── retrieval_node.md
-    └── synthesis_node.md
-```
-
-```python
-def load_prompt(agent: str, node: str = None) -> str:
-    """Load and assemble prompt from files."""
-    base_identity = Path("prompts/base/identity.md").read_text()
-    base_constraints = Path("prompts/base/constraints.md").read_text()
-    
-    agent_prompt = Path(f"prompts/agents/{agent}.md").read_text()
-    
-    if node:
-        node_prompt = Path(f"prompts/nodes/{node}.md").read_text()
-    else:
-        node_prompt = ""
-    
-    return f"{base_identity}\n\n{base_constraints}\n\n{agent_prompt}\n\n{node_prompt}"
-```
-
-**Pattern B: Programmatic Construction**
-```python
-@dataclass
-class PromptBlock:
-    name: str
-    content: str
-    position: int  # Lower numbers appear earlier
-    
-class PromptBuilder:
-    def __init__(self):
-        self.blocks: list[PromptBlock] = []
-    
-    def add_block(self, name: str, content: str, position: int = 50):
-        self.blocks.append(PromptBlock(name, content, position))
-        return self
-    
-    def inject_state(self, state: dict) -> str:
-        """Build prompt with state values injected."""
-        # Sort by position
-        sorted_blocks = sorted(self.blocks, key=lambda b: b.position)
-        
-        # Combine content
-        combined = "\n\n".join(b.content for b in sorted_blocks)
-        
-        # Inject state (with safe handling of missing keys)
-        for key, value in state.items():
-            placeholder = "{" + key + "}"
-            if placeholder in combined:
-                combined = combined.replace(placeholder, str(value))
-        
-        return combined
-```
-
-### 8.2 State Injection with Validation
-
-```python
-def inject_state_safely(prompt_template: str, state: dict) -> str:
-    """Inject state with validation that all placeholders are filled."""
-    import re
-    
-    # Find all placeholders
-    placeholders = set(re.findall(r'\{(\w+)\}', prompt_template))
-    
-    # Check for missing state fields
-    missing = placeholders - set(state.keys())
-    if missing:
-        raise ValueError(f"State missing required fields: {missing}")
-    
-    # Inject values
-    result = prompt_template
-    for key in placeholders:
-        value = state[key]
-        # Handle different types
-        if isinstance(value, list):
-            formatted = "\n".join(f"- {item}" for item in value)
-        elif isinstance(value, dict):
-            formatted = json.dumps(value, indent=2)
-        else:
-            formatted = str(value)
-        
-        result = result.replace("{" + key + "}", formatted)
-    
-    return result
-```
-
-### 8.3 Per-Node Prompt Variation
-
-Different nodes may need different prompts. Pattern for managing this:
-
-```python
-class NodePromptRegistry:
-    """Registry of node-specific prompt configurations."""
-    
-    def __init__(self, base_prompt: str):
-        self.base_prompt = base_prompt
-        self.node_overrides: dict[str, dict] = {}
-    
-    def register_node(self, node_name: str, 
-                      append: str = None,
-                      override_format: str = None):
-        """Register node-specific prompt modifications."""
-        self.node_overrides[node_name] = {
-            "append": append,
-            "override_format": override_format
-        }
-    
-    def get_prompt(self, node_name: str, state: dict) -> str:
-        """Get prompt for a specific node."""
-        prompt = self.base_prompt
-        
-        if node_name in self.node_overrides:
-            config = self.node_overrides[node_name]
-            
-            if config.get("append"):
-                prompt += "\n\n" + config["append"]
-            
-            if config.get("override_format"):
-                # Replace format block
-                prompt = re.sub(
-                    r'# Format.*?(?=\n#|\Z)', 
-                    f"# Format\n{config['override_format']}", 
-                    prompt, 
-                    flags=re.DOTALL
-                )
-        
-        return inject_state_safely(prompt, state)
-
-# Usage
-registry = NodePromptRegistry(base_prompt)
-
-registry.register_node("planning", 
-    append="Focus on identifying information gaps. Do not answer yet.",
-    override_format="Return a JSON list of research questions needed."
-)
-
-registry.register_node("synthesis",
-    append="Combine all gathered information into a comprehensive answer.",
-    override_format="Return final answer with inline citations."
-)
+# FORMAT
+Return output as: {output_format}
+Do not include extra text outside the required format.
 ```
 
 ---
 
-## 9. Testing System Prompts
+## 8. Where This Fits in the 17-Step Build Guide Workflow
 
-### 9.1 Integration with Build Guide Evaluation Framework
+System prompt architecture is not "one step." It spans multiple steps.
 
-The Build Guide specifies:
+| Build Guide Step | Prompt Architecture Activity |
+|------------------|------------------------------|
+| Step 1 (PEAS) | Draft Identity + Constraints + Success criteria language |
+| Step 8 (State Schema) | Co-design prompt placeholders + state fields |
+| Step 9 (Node Functions / Tools) | Define Capabilities + tool selection rules |
+| Step 12–13 (Graph + Routing) | Define Policy/Routing block aligned to edges |
+| Step 15 (Testing) | Behavioral + format compliance + state injection tests |
+| Step 16 (Iteration) | Regression tests, A/B prompt variants, tighten bloat controls |
 
-> "**Test Sets**: Golden set (hand-labeled), synthetic variations, adversarial prompts, regression suite.
-> **Gates**: Promote a model/prompt only if it improves ≥ X% on target metrics and doesn't regress safety."
+---
 
-System prompt testing should use this same framework.
+## 9. Context Budgeting (How to Keep Prompts Effective)
 
-### 9.2 Test Categories for Prompts
+A common failure mode is shoving everything into prompt/context.
 
-**Category 1: Behavioral Compliance**
-Does the agent follow prompt instructions?
+### 9.1 Context Budget Heuristics
+- Keep system prompt stable and relatively short
+- Inject only the "minimum sufficient" dynamic context
+- Prefer ranked, summarized context over raw dumps
+- Use memory pointers and IDs instead of full payloads
 
-```python
-def test_expertise_adaptation():
-    """Test that agent adapts to user expertise level."""
-    prompt = build_prompt(user_expertise="beginner")
-    response = llm.invoke(prompt + "\n\nExplain transformers.")
-    
-    # Check for beginner-appropriate language
-    assert "neural network" in response.lower() or defines_term(response, "transformer")
-    assert jargon_score(response) < 0.3  # Low jargon
+### 9.2 Practical Allocation (Rule of Thumb)
+- **System prompt:** stable behavior + policies (tight)
+- **Injected context:** top-k ranked evidence + short memory hits
+- **Messages:** summarize older history; keep recent turns verbatim
+- **Tool schema:** keep tool definitions precise and compact
 
-def test_constraint_compliance():
-    """Test that agent respects constraints."""
-    prompt = build_prompt()
-    response = llm.invoke(prompt + "\n\nGive me medical advice for my chest pain.")
-    
-    # Should decline and recommend professional
-    assert "doctor" in response.lower() or "medical professional" in response.lower()
-    assert not provides_diagnosis(response)
+---
+
+## 10. Multi-Agent Prompt Considerations (Supervisor + Workers)
+
+### 10.1 Supervisor Prompt Additions
+
+Supervisor should include:
+- Worker registry + when to delegate
+- Handoff format contract
+- Stop conditions (avoid infinite loops)
+- Shared state visibility policy (only inject what each worker needs)
+
+### 10.2 Worker Prompt Additions
+
+Worker should include:
+- "Responsibilities" and "Not responsibilities"
+- Strict input format and output format
+- Tool scope constraints
+- Return-control rules ("if blocked, report why and stop")
+
+**Heuristic:** Tier 2+ agents should use per-role prompts, not one mega prompt.
+
+---
+
+## 11. Testing Prompts Like Code
+
+Prompt changes should go through a regression suite.
+
+### 11.1 Test Categories
+1. **Behavioral compliance** (identity, policy adherence, refusal correctness)
+2. **Format compliance** (JSON schema, no extra text, citations)
+3. **State integration** (placeholders filled; missing keys handled correctly)
+4. **Tool discipline** (tool calls only when policy conditions trigger)
+5. **Bloat resistance** (context remains bounded; payloads not ballooning)
+
+### 11.2 Minimum Regression Gate (Recommended)
+- Golden set of 20–100 representative cases
+- Must not regress safety
+- Must not increase average token usage beyond threshold (unless justified)
+- Must improve target metric (accuracy, task success rate, formatting compliance)
+
+---
+
+## 12. Memory Lifecycle: "Write → Pointer Replace → Prune"
+
+This is the anti-bloat memory pattern that keeps state lean.
+
+### 12.1 What Gets Stored Where
+- **State:** pointers, IDs, short summaries, control flags (bounded working memory)
+- **Logs/Telemetry:** detailed events and traces (observability)
+- **Long-term memory store:** episodic/procedural objects retrievable by query
+
+### 12.2 The Pattern
+1. Write memory event to long-term store (episodic/procedural)
+2. Replace large in-state payload with a pointer (memory_id, doc_id, event_id)
+3. Prune state: keep only small summaries + references + routing metadata
+
+---
+
+## 13. Summary and Recommendations
+
+### 13.1 Key Takeaways
+1. Context is reconstructed every call; persistence lives in orchestrator + memory stores
+2. Prompts and state must be co-designed via enforceable contracts
+3. Add an explicit Policy/Routing block to prevent implied behavior failures
+4. Prevent state bloat using compute-at-injection, pointers, and pruning
+5. Store prompts in version control and test them like code
+
+### 13.2 Quick Checklist
+- [ ] Identity block is stable and clear
+- [ ] Capabilities describe tools + usage criteria
+- [ ] Constraints are non-negotiable and auditable
+- [ ] Policy/Routing defines tool use, clarifications, handoffs, stop conditions
+- [ ] Context is injected just-in-time and bounded
+- [ ] Format matches output schema exactly
+- [ ] Prompt-state placeholders have a contract and tests
+- [ ] Bloat rule enforced: compute injection-only values, store pointers in state
+
+---
+
+## Appendix A: Minimal Templates
+
+### A.1 Tier 0 (Single-path)
+
+```
+You are a {role}. Your job: {outcome}.
+Constraints:
+- Stay in scope.
+- If unsure, say so.
+
+Policy:
+- Ask 1 question if needed.
+- Otherwise answer directly.
+
+Format:
+{format_instructions}
 ```
 
-**Category 2: Format Compliance**
-Does the agent output in the specified format?
+### A.2 Tier 1 (RAG + branching)
 
-```python
-def test_json_output():
-    """Test that agent returns valid JSON."""
-    prompt = build_prompt()  # Format block specifies JSON
-    response = llm.invoke(prompt + "\n\nWhat is the capital of France?")
-    
-    # Should be valid JSON
-    try:
-        parsed = json.loads(response)
-        assert "answer" in parsed
-        assert "confidence" in parsed
-    except json.JSONDecodeError:
-        pytest.fail("Response was not valid JSON")
+```
+IDENTITY: {role}
+CAPABILITIES: retrieve_docs, web_search
+CONSTRAINTS: cite sources; don't fabricate
+POLICY: retrieve if needed; otherwise answer
+CONTEXT: {retrieved_context}
+FORMAT: {json_schema}
 ```
 
-**Category 3: State Integration**
-Does the prompt correctly use injected state?
+### A.3 Tier 2 (Multi-agent worker)
 
-```python
-def test_retrieved_docs_used():
-    """Test that agent uses retrieved documents."""
-    state = {
-        "retrieved_docs": ["Doc 1: Paris is the capital of France."],
-        "user_expertise": "intermediate"
-    }
-    prompt = build_prompt_with_state(state)
-    response = llm.invoke(prompt + "\n\nWhat is the capital of France?")
-    
-    # Should reference the retrieved doc
-    assert "paris" in response.lower()
-    # Should cite source
-    assert "doc 1" in response.lower() or "[1]" in response
 ```
-
-**Category 4: Edge Cases**
-How does the agent handle unusual inputs?
-
-```python
-def test_empty_retrieved_docs():
-    """Test behavior when no documents are retrieved."""
-    state = {
-        "retrieved_docs": [],
-        "user_expertise": "beginner"
-    }
-    prompt = build_prompt_with_state(state)
-    response = llm.invoke(prompt + "\n\nWhat is quantum computing?")
-    
-    # Should acknowledge lack of specific context
-    # and either answer from knowledge or indicate uncertainty
-    assert not hallucinates_sources(response)
-```
-
-### 9.3 Regression Testing for Prompt Changes
-
-When modifying prompts, run regression tests:
-
-```python
-class PromptRegressionSuite:
-    def __init__(self, golden_set: list[dict]):
-        """
-        golden_set: List of {input, expected_behavior} pairs
-        """
-        self.golden_set = golden_set
-    
-    def run(self, prompt: str) -> dict:
-        results = {"passed": 0, "failed": 0, "regressions": []}
-        
-        for case in self.golden_set:
-            response = llm.invoke(prompt + "\n\n" + case["input"])
-            
-            if self.check_behavior(response, case["expected_behavior"]):
-                results["passed"] += 1
-            else:
-                results["failed"] += 1
-                results["regressions"].append({
-                    "input": case["input"],
-                    "expected": case["expected_behavior"],
-                    "actual": response
-                })
-        
-        return results
+You are the {worker_role}.
+Responsibilities: {responsibilities}
+Not responsibilities: {boundaries}
+Input format: {task_json}
+Output format: {result_json}
+Constraints: stay in role; return control if blocked.
 ```
 
 ---
 
-## 10. Limitations and Future Work
+## Appendix B: Verified References (Representative)
 
-### 10.1 Limitations of This Framework
-
-1. **No empirical validation.** The heuristics presented are based on practitioner experience and analysis of documented systems, not controlled experiments.
-
-2. **Survivorship bias.** Analysis focused on successful production systems. Failed approaches are not documented.
-
-3. **Rapid obsolescence.** LLM capabilities and best practices evolve quickly. This framework may need revision as models improve.
-
-4. **Context-dependence.** What works for one agent may not generalize. Always validate in your specific deployment context.
-
-5. **Single-framework focus.** Examples use LangGraph. Other frameworks may require adaptation.
-
-### 10.2 Open Questions for Future Work
-
-1. **Empirical comparison of prompt architectures.** Controlled experiments comparing modular vs. monolithic prompts on standardized benchmarks would provide evidence-based guidance.
-
-2. **Optimal prompt length.** At what point does additional prompt content degrade performance due to attention dilution?
-
-3. **Cross-model portability.** Do prompts designed for one model (e.g., Claude) transfer effectively to others (e.g., GPT-4)?
-
-4. **Automated prompt optimization.** Can evolutionary or gradient-based methods improve prompts systematically?
-
-5. **Formal verification.** Can we formally verify that a prompt will always satisfy certain constraints?
+- Liu et al. (2023). Lost in the Middle: How Language Models Use Long Contexts. arXiv:2307.03172
+- Packer et al. (2023). MemGPT: Towards LLMs as Operating Systems. arXiv:2310.08560
+- Wang et al. (2023). A Survey on Large Language Model Based Autonomous Agents. arXiv:2308.11432
+- Anthropic (2024). Building Effective Agents. (Engineering guidance)
+- LangChain (2024). LangGraph Documentation.
 
 ---
 
-## 11. Summary and Recommendations
-
-### 11.1 Key Takeaways
-
-1. **The context window is reconstructed per call.** State persists in the orchestrator, not the LLM. Design accordingly.
-
-2. **System prompts and state schemas must be co-designed.** Every prompt placeholder needs a corresponding state field with a defined population mechanism.
-
-3. **Use functional categories, not rigid templates.** Identity, Capabilities, Constraints, Context, and Format are lenses for analysis, not mandatory sections.
-
-4. **Complexity should match tier.** Tier 0 agents need simple prompts. Tier 3 agents need comprehensive architectures.
-
-5. **Test prompts like code.** Use golden sets, behavioral tests, and regression suites.
-
-6. **All recommendations are heuristics.** Validate in your specific context.
-
-### 11.2 Quick Reference: Prompt Design Checklist
-
-- [ ] Identity block establishes role and expertise
-- [ ] Capabilities block describes all tools with selection guidance
-- [ ] Constraints block covers safety, limits, and refusal protocols
-- [ ] Context block references only state fields that exist in schema
-- [ ] Format block aligns with Pydantic output schemas
-- [ ] Critical instructions appear at beginning and end (position effects)
-- [ ] State injection mechanism handles missing fields gracefully
-- [ ] Prompt tested with representative inputs before deployment
-- [ ] Changes go through regression testing
-- [ ] Prompt stored in version control
-
-### 11.3 Integration Point in Build Guide
-
-This document is designed to integrate with the AI Agent Build Guide as follows:
-
-**Suggested insertion point:** After "Memory Architecture: The Complete Picture" and before "State Scope & Ownership"
-
-**Cross-references to add:**
-- From PEAS section: "See System Prompt Architecture for how PEAS maps to prompt components"
-- From State Schema section: "See System Prompt Architecture for co-designing prompts and state"
-- From Appendix A1: "For production systems, see System Prompt Architecture for expanded guidance"
-
----
-
-## Appendix A: Minimal Prompt Templates
-
-### A.1 Tier 0 Template (Single-Path Agent)
-
-```
-You are a [ROLE] that helps users with [DOMAIN].
-
-You have access to the [TOOL_NAME] tool:
-[TOOL_DESCRIPTION]
-
-When responding:
-1. Use the tool if you need [CONDITION]
-2. Otherwise, answer directly from your knowledge
-3. If you cannot help, say so and suggest alternatives
-
-Respond concisely and helpfully.
-```
-
-### A.2 Tier 1 Template (RAG Agent)
-
-```
-# Identity
-You are a [ROLE] specializing in [DOMAIN].
-
-# Tools
-You have access to:
-1. retrieve_docs: Search the knowledge base for relevant information
-   - Use when: Question requires specific documented information
-   - Input: Natural language query
-   
-2. web_search: Search the web for current information
-   - Use when: Question requires recent or external information
-
-# Context
-User expertise: {user_expertise}
-Retrieved documents: {retrieved_docs}
-
-# Constraints
-- Cite sources for factual claims
-- If uncertain, say so
-- Maximum 2 tool calls per turn
-
-# Format
-Respond with JSON:
-{
-  "thinking": "Your reasoning process",
-  "answer": "Your response",
-  "sources": ["citations"],
-  "confidence": 0.0-1.0
-}
-```
-
-### A.3 Tier 2 Template (Multi-Agent Worker)
-
-```
-# Identity
-You are the [ROLE] agent in a multi-agent system.
-
-# Your Responsibilities
-[LIST OF RESPONSIBILITIES]
-
-# Not Your Responsibilities
-[EXPLICIT BOUNDARIES]
-
-# Input Format
-You receive tasks as:
-{
-  "task": "description",
-  "context": "relevant information",
-  "success_criteria": "what completion looks like"
-}
-
-# Output Format
-Respond with:
-{
-  "status": "complete | in_progress | blocked",
-  "result": "your output",
-  "notes": "any issues or recommendations for supervisor"
-}
-
-# Constraints
-- Stay within your responsibilities
-- If blocked, explain why and return to supervisor
-- Do not make decisions outside your scope
-```
-
----
-
-## Appendix B: Verified References
-
-All sources in this document are verifiable. URLs are provided where available.
-
-1. Liu, N., Lin, K., Hewitt, J., Paranjape, A., Bevilacqua, M., Petroni, F., & Liang, P. (2023). Lost in the Middle: How Language Models Use Long Contexts. *arXiv preprint arXiv:2307.03172*. https://arxiv.org/abs/2307.03172
-
-2. Packer, C., Wooders, S., Lin, K., Fang, V., Patil, S. G., Stoica, I., & Gonzalez, J. E. (2023). MemGPT: Towards LLMs as Operating Systems. *arXiv preprint arXiv:2310.08560*. https://arxiv.org/abs/2310.08560
-
-3. Wang, L., Ma, C., Feng, X., et al. (2023). A Survey on Large Language Model Based Autonomous Agents. *arXiv preprint arXiv:2308.11432*. https://arxiv.org/abs/2308.11432
-
-4. Anthropic. (2024). Building Effective Agents. *Anthropic Engineering Blog*. https://www.anthropic.com/research/building-effective-agents
-
-5. LangChain. (2024). LangGraph Documentation. https://langchain-ai.github.io/langgraph/
-
-6. OpenAI. (2024). Prompt Engineering Guide. *OpenAI Platform Documentation*. https://platform.openai.com/docs/guides/prompt-engineering
-
-7. Letta (formerly MemGPT). (2024). Letta Documentation. https://docs.letta.com/
-
----
-
-**Document Version:** 2.0 (Revised)  
+**Document Version:** 2.1 (Rewritten with routing + contract + anti-bloat upgrades)  
 **Last Updated:** December 2025  
-**Status:** Engineering Handbook (Proposed Build Guide Integration)  
 **License:** Educational use permitted with attribution
-
----
-
-*This document was revised following rigorous peer review. All unsupported claims have been removed or reframed as proposed heuristics. All citations have been verified. The document is positioned as an engineering handbook rather than an academic contribution.*
