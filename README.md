@@ -24,7 +24,72 @@ Just understanding.
 
 ---
 
-## 📓 Sections
+## � AI Agent Build Guide (v1.0)
+
+This repository includes a comprehensive **AI Agent Build Guide** that documents a
+production-oriented architecture for building reliable, scalable, and testable
+LLM-based agent systems.
+
+The Build guide treats **system prompts as first-class engineering artifacts**
+and integrates them explicitly with:
+
+- Agent state schemas
+- Memory and context management
+- Orchestration and routing logic
+- Multi-agent (supervisor–worker) coordination
+- Testing, validation, and regression discipline
+
+Unlike ad-hoc prompt engineering approaches, the guide defines **enforceable
+contracts and architectural boundaries** that allow agent systems to scale
+without prompt drift, context bloat, or coordination failures.
+
+---
+
+### 🧱 Architectural Scope
+
+The Build guide covers the full lifecycle of agent construction, including:
+
+- Modular system prompt architecture
+- Prompt–state contracts and placeholder enforcement
+- Prompt testing and regression gates
+- Context budgeting and anti-bloat guardrails
+- Multi-agent prompt standards with explicit handoff contracts
+- Loop guards, duplication prevention, and shared-state visibility rules
+
+These patterns are framework-agnostic and apply to orchestrated LLM agents
+built with tools such as LangGraph, LangChain, or custom orchestration layers.
+
+---
+
+### 🏷️ Stable Architecture Baseline
+
+The current stable architecture is tagged as:
+
+**`v1.0-agent-architecture-spine`**
+
+This release represents the completed integration of:
+- Phase 1: Modular system prompt architecture
+- Phase 2: Prompt–state contracts and testing discipline
+- Phase 3: Multi-agent prompt standards and coordination protocols
+
+Future changes build on this baseline and do not alter the v1.0 architecture.
+
+---
+
+### 🚀 Getting Started
+
+If you are new to the repository:
+
+1. Start with the **AI Agent Build Guide** for the architectural overview.
+2. Review Appendix A1 / A1b for system prompt templates.
+3. Use the v1.0 tag as a stable reference point when building or extending agents.
+
+The guide is written for practitioners designing real agent systems—not
+toy demos—and emphasizes clarity, enforceability, and long-term maintainability.
+
+---
+
+## �📓 Sections
 
 ### 🔹 Agentic AI Notebooks
 Hands-on, executable notebooks exploring concepts from first principles.
@@ -48,15 +113,9 @@ Visual models of state, reasoning flows, and multi-agent coordination.
 ---
 
 ### 🔹 AI Agent Build Guide
-A comprehensive, tier-based framework for building production-ready AI agents from scratch. This isn't a tutorial—it's an **engineering blueprint** that transforms agent development from ad-hoc prompting into disciplined systems architecture.
+See the dedicated section above for the full architectural overview and v1.0 release details.
 
-The guide progresses through four tiers: from stateless single-agent systems to orchestrated multi-agent architectures. It treats **system prompts as first-class engineered artifacts**, not afterthoughts—complete with modular block structure, state contracts, regression testing, and failure containment patterns.
-
-Each tier builds on explicit state management, structured reasoning, and evaluation gates. You'll learn not just *how* to build agents, but *why* architectural choices matter—from memory lifecycle policies to multi-agent handoff protocols to production security checklists.
-
-If you're building agents that need to scale beyond demos, this guide is your canonical reference. Phases 1–3 of the **System Prompt Architecture** integration are complete and tagged as `v1.0-agent-architecture-spine`.
-
-**Start here:** [`AI Agent Build Guide.md`](AI%20Agent%20Build%20Guide.md)
+**Direct link:** [`AI Agent Build Guide.md`](AI%20Agent%20Build%20Guide.md)
 
 ---
 
