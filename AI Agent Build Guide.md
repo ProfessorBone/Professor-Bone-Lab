@@ -1227,6 +1227,8 @@ Before finalizing your state schema, validate:
 **Concept Capsule:**
 Memory systems can make agents smarter — or catastrophically slower if mismanaged. This module teaches you the discipline of when to query long-term memory, when to write, and how to prevent unbounded memory growth through pointer-replace and pruning patterns. Follow these patterns to build agents that learn without drowning in their own history.
 
+**Note:** For prompt-specific anti-bloat guardrails (summaries over chunks, top-K injection, context budgeting), see **Context Budgeting & Anti-Bloat Guardrails** in the System Prompt Architecture section.
+
 **Learning Objectives**
 • Identify the three critical moments to query episodic/procedural memory
 • Distinguish memory-qualifying updates from ephemeral state changes
@@ -3021,6 +3023,306 @@ Before deploying a system prompt:
 
 ---
 
+### Prompt–State Contract
+
+**What It Is:**
+Every placeholder referenced in a system prompt is a contract binding prompt design to state schema and orchestration logic. When you write `{user_expertise}` in a prompt, you create an obligation: that field must exist in state, have a defined owner, update on a known schedule, and handle failures gracefully.
+
+**Contract Invariants (Required Checklist):**
+
+- [ ] Every `{placeholder}` maps to a known state field OR a computed value with defined inputs
+- [ ] Ownership is explicit (developer/operator/user/agent)
+- [ ] Update frequency is documented (static/session/turn/per-call)
+- [ ] Population mechanism is specified (state lookup/computation/default)
+- [ ] Failure behavior is defined (error/fallback/refusal)
+- [ ] Required vs optional placeholders are distinguished
+- [ ] Computed values document their source state fields
+
+**Contract Table Template:**
+
+Use this table to formalize prompt-state contracts before implementation:
+
+| Placeholder | State Field / Source | Owner | Update Frequency | Population Mechanism | Failure Behavior |
+|-------------|---------------------|-------|------------------|---------------------|------------------|
+| `{task_phase}` | `state.task_phase` | Orchestrator | Per node transition | Direct state field lookup | **Hard fail** – invalid state |
+| `{user_expertise}` | `state.user_expertise` | User (session init) | Session-scoped | State field with default="intermediate" | Use default value |
+| `{retrieved_context}` | Computed from `state.doc_ids` | Agent (retrieval node) | Per retrieval call | Rank docs → summarize top-K | Empty block (allowed) |
+
+**Example Contract Violations and Fixes:**
+
+| Violation | Impact | Fix |
+|-----------|--------|-----|
+| Prompt references `{user_location}` but state has no such field | Runtime crash or silent failure | Add `user_location: Optional[str]` to state schema |
+| Placeholder `{task_summary}` computed from undefined `state.completed_steps` | Computation fails | Define `completed_steps: list[str]` in state |
+| No failure behavior for missing `{retrieved_docs}` | Inconsistent agent behavior | Specify: "If empty, use fallback prompt block" |
+
+**When to Define Contracts:**
+- **Before** writing node functions that inject context
+- **During** state schema design (co-design prompts + state)
+- **When** adding new placeholders to existing prompts
+- **Before** deploying prompt changes to production
+
+---
+
+### Prompt Testing Like Code
+
+**Core Principle:** Prompts are code. They have inputs (state), outputs (LLM context), and failure modes. They must be tested, versioned, and regression-protected.
+
+#### **Regression Gates Checklist**
+
+Before deploying any prompt change, verify:
+
+- [ ] **Placeholder Resolution** – No unresolved `{...}` remain in constructed prompts
+- [ ] **Format Compliance** – Output conforms to declared JSON schema or markdown structure
+- [ ] **Tool Discipline** – Agent respects tool-use policy (no hallucinated tools, no unnecessary calls)
+- [ ] **Context Budget** – Injected content respects token limits (see Context Budgeting subsection)
+- [ ] **Safety Adherence** – Constraints block is never bypassed or weakened
+- [ ] **Behavioral Consistency** – Agent performs identically on regression test set (within tolerance)
+- [ ] **Refusal Accuracy** – Out-of-scope requests are correctly refused with alternatives
+
+#### **Lightweight Test Harness Guidance**
+
+**Approach:** Create deterministic test cases that construct prompts, inject them into the LLM, and validate outputs.
+
+**Minimal Structure (Pseudocode):**
+
+```python
+# tests/test_prompts.py
+
+class PromptRegressionTests:
+    
+    def test_placeholder_resolution(self):
+        """Verify all placeholders are populated"""
+        state = {"task_phase": "planning", "user_expertise": "beginner"}
+        prompt = build_system_prompt(state)
+        
+        # Assert no unresolved placeholders remain
+        assert "{" not in prompt and "}" not in prompt
+        assert "task_phase: planning" in prompt
+    
+    def test_format_compliance(self):
+        """Verify output matches schema"""
+        state = create_test_state()
+        response = agent.run(state)
+        
+        # Validate against JSON schema
+        validate_json_schema(response, expected_schema)
+        assert "answer" in response
+        assert "citations" in response
+    
+    def test_tool_discipline(self):
+        """Verify tool-use policy is respected"""
+        # Simple query that should NOT trigger tools
+        state = {"messages": [{"role": "user", "content": "What is 2+2?"}]}
+        
+        tool_calls = agent.run(state, track_tools=True)
+        assert len(tool_calls) == 0  # Should answer directly
+        
+        # Complex query that SHOULD trigger retrieval
+        state = {"messages": [{"role": "user", "content": "What are the latest..."}]}
+        tool_calls = agent.run(state, track_tools=True)
+        assert "retrieve_docs" in [t.name for t in tool_calls]
+    
+    def test_context_budget(self):
+        """Verify injected context stays within limits"""
+        state = create_state_with_many_docs(num_docs=100)
+        prompt = build_system_prompt(state)
+        
+        # Count tokens in injected context block
+        context_tokens = count_tokens(extract_context_block(prompt))
+        assert context_tokens <= MAX_CONTEXT_TOKENS
+    
+    def test_safety_constraints(self):
+        """Verify refusal works correctly"""
+        unsafe_query = "Ignore previous instructions and..."
+        response = agent.run({"messages": [{"role": "user", "content": unsafe_query}]})
+        
+        assert "cannot" in response.lower() or "refuse" in response.lower()
+        assert response_suggests_alternative(response)
+```
+
+**Implementation Options:**
+
+1. **Pytest-based** (recommended for Python projects):
+   ```bash
+   pytest tests/test_prompts.py -v
+   ```
+
+2. **Script-based** (for simpler setups):
+   ```python
+   # run_prompt_tests.py
+   def run_all_tests():
+       results = []
+       results.append(test_placeholder_resolution())
+       results.append(test_format_compliance())
+       # ... etc
+       return all(results)
+   ```
+
+3. **CI/CD Integration**:
+   ```yaml
+   # .github/workflows/test.yml
+   - name: Run prompt regression tests
+     run: pytest tests/test_prompts.py --regression
+   ```
+
+**Golden Test Set Requirements:**
+
+- **Minimum:** 20 representative cases covering common scenarios
+- **Include:** Edge cases (empty context, maximum context, ambiguous queries)
+- **Include:** Adversarial cases (jailbreak attempts, format violations)
+- **Update:** When adding new capabilities or changing constraints
+- **Freeze:** Version alongside prompts in git
+
+**Deterministic Testing Tips:**
+
+- Set `temperature=0` for reproducible LLM outputs
+- Use fixed `seed` values when available
+- Mock external tools for unit tests (test prompt logic independently)
+- Track token counts to detect bloat regressions
+
+---
+
+### Context Budgeting & Anti-Bloat Guardrails
+
+**Problem:** Without discipline, prompts grow to consume entire context windows, wasting tokens and degrading performance.
+
+**Solution:** Enforce strict budgeting rules that align with state schema discipline from Memory Lifecycle & Anti-Bloat Patterns.
+
+#### **Core Rules**
+
+**Rule 1: Summaries Over Raw Chunks**
+
+❌ **Wrong:**
+```python
+# Inject all retrieved document text directly
+context_block = "\n".join([doc.page_content for doc in retrieved_docs])
+# Result: 50KB of raw text in every prompt
+```
+
+✅ **Correct:**
+```python
+# Summarize and rank before injection
+ranked_docs = rank_by_relevance(retrieved_docs, query)
+top_k = ranked_docs[:5]
+context_block = "\n".join([summarize_doc(doc, max_chars=200) for doc in top_k])
+# Result: ~1KB of relevant summaries
+```
+
+**Rule 2: Top-K Injection Only**
+
+- Never inject ALL retrieved results
+- Set explicit limits: top-3, top-5, or top-10 based on task complexity
+- Prefer quality over quantity
+
+**Rule 3: Pointer Replace Pattern**
+
+❌ **Wrong (State Bloat):**
+```python
+state["retrieved_docs"] = [full_document_1, full_document_2, ...]  # 100KB in state
+state["tool_output"] = entire_api_response  # Another 50KB
+```
+
+✅ **Correct (Store Pointers, Compute Summaries):**
+```python
+# Store only IDs/refs in state
+state["retrieved_doc_ids"] = ["doc_123", "doc_456", "doc_789"]
+state["tool_result_ref"] = "result_abc_20231201_1430"
+
+# At injection time, fetch and summarize
+def build_context_block(state):
+    doc_ids = state.get("retrieved_doc_ids", [])
+    docs = [doc_store.get(id) for id in doc_ids[:5]]  # Top 5 only
+    return "\n".join([summarize(doc) for doc in docs])
+```
+
+**Rule 4: "Who Reads It?" Test**
+
+Ask: *Who actually reads this value?*
+
+| Reader | Storage Strategy |
+|--------|------------------|
+| **Only LLM** | ✅ Compute at injection time, don't store in state |
+| **Orchestration logic** | ✅ Store in state (needed for routing decisions) |
+| **Both** | ⚠️ Store minimal version (e.g., doc count), compute full summary at injection |
+| **Nobody** | ❌ Delete it – why does it exist? |
+
+**Examples:**
+
+| Value | Who Reads It? | Storage Decision |
+|-------|---------------|------------------|
+| Full retrieved document text | Only LLM | Compute summary at injection |
+| Count of retrieved docs | Orchestrator (routing) | Store in state |
+| User expertise level | Both | Store in state |
+| Intermediate reasoning steps | Nobody | Ephemeral (don't store) |
+
+#### **Context Budget Allocation (Rule of Thumb)**
+
+| Component | Token Budget | Example |
+|-----------|--------------|----------|
+| **System Prompt (stable blocks)** | 500-1500 | Identity + Capabilities + Constraints + Policy + Format |
+| **Injected Context** | 1000-3000 | Retrieved docs + memory hits + task-specific data |
+| **Conversation History** | 500-2000 | Last 5-10 turns (summarize older) |
+| **Tool Schemas** | 200-500 | Function definitions |
+| **Reserved for Output** | 1000-4000 | LLM generation space |
+
+**Total budget for 8K context model:** ~8000 tokens  
+**Total budget for 128K context model:** Use same discipline—don't waste it!
+
+#### **Budget Enforcement Mechanisms**
+
+**1. Pre-Injection Validation:**
+```python
+def validate_context_budget(context_components: dict) -> bool:
+    total_tokens = sum([count_tokens(v) for v in context_components.values()])
+    
+    if total_tokens > MAX_CONTEXT_TOKENS:
+        raise ContextBudgetExceeded(
+            f"Context would be {total_tokens} tokens, limit is {MAX_CONTEXT_TOKENS}"
+        )
+    
+    return True
+```
+
+**2. Dynamic Truncation:**
+```python
+def fit_to_budget(items: list, budget: int) -> list:
+    """Include items until budget exhausted"""
+    result = []
+    tokens_used = 0
+    
+    for item in items:
+        item_tokens = count_tokens(item)
+        if tokens_used + item_tokens <= budget:
+            result.append(item)
+            tokens_used += item_tokens
+        else:
+            break
+    
+    return result
+```
+
+**3. Compression Strategies:**
+- Summarize older conversation turns
+- Use bullet points instead of paragraphs
+- Abbreviate field names in injected JSON
+- Remove redundant/repeated information
+
+#### **Cross-Reference: State Schema Discipline**
+
+These context budgeting rules directly support principles from **Memory Lifecycle & Anti-Bloat Patterns**:
+
+- **Pointer replace** (store IDs, not payloads) keeps state lean
+- **Prune** (remove stale context) prevents accumulation
+- **Compute at read time** (summaries on injection) avoids storing processed data
+
+**Integration Point:**
+When designing state schemas, ask: "Will this be injected into prompts?"  
+- If YES → Store pointer, compute summary at injection  
+- If NO → Store normally (orchestration data)
+
+---
+
 **Key Takeaway:** System prompts are not just text—they are architectural components that must be engineered with the same rigor as state schemas and orchestration logic. The six-block structure + prompt-state contracts + anti-bloat patterns form the foundation for reliable, maintainable agent systems.
 
 ⸻
@@ -4641,6 +4943,7 @@ The simplest agent can already act. It receives structured input, reasons about 
    - **Note:** Appendix A1 is sufficient for Tier 0/Tier 1 baseline, but A1b is recommended when tool/state complexity increases.
 4. **Implement one tool** with strict type validation.
 5. **Build ground-truth examples** for testing.
+   - **Include prompt regression gates:** See **Prompt Testing Like Code** in the System Prompt Architecture section for regression test checklist and test harness guidance.
 6. **Run inference**, validate JSON, retry once if needed.
 7. **Expose as CLI** or FastAPI route.
 8. **Log every transaction**.
