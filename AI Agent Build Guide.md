@@ -3993,6 +3993,599 @@ except ContractViolation as e:
 
 ⸻
 
+## Multi-Agent Prompt Standards (Supervisor–Worker)
+
+**Concept Capsule:**
+Multi-agent systems require more than state contracts—they require prompt-level coordination that defines authority boundaries, handoff protocols, and failure containment. This module establishes canonical supervisor–worker prompt standards for hierarchical multi-agent systems, ensuring clear responsibility boundaries and preventing common failure modes like infinite delegation loops and duplicate work.
+
+**Scope:** These standards apply exclusively to hierarchical (supervisor–worker) multi-agent systems. Supervisor coordinates and synthesizes; workers execute specialized tasks. Prompts define who has authority to do what.
+
+**Learning Objectives**
+• Define supervisor prompt requirements including worker registry and delegation protocol
+• Implement explicit handoff contracts (supervisor → worker)
+• Establish worker prompt boundaries and return-control protocols
+• Apply shared-state visibility policies to prevent context bloat
+• Implement loop guards and duplication prevention
+• Test multi-agent prompt interactions independently
+
+**Tier Scope:** This guidance is Tier 2+ (multi-agent systems). If you're still building Tier 1 single-agent systems, defer this module until you need multi-agent coordination.
+
+---
+
+### Supervisor Prompt Responsibilities
+
+The supervisor is the orchestrator. It does NOT execute worker tasks itself—it coordinates, delegates, validates, and synthesizes.
+
+#### **Worker Registry Template**
+
+The supervisor must know what workers exist and when to invoke them. Include this in the supervisor's Capabilities block:
+
+```
+# CAPABILITIES (Supervisor-Specific)
+
+You coordinate the following specialist agents:
+
+1. Researcher
+   • Invoke when: External or internal information is required
+   • Inputs: research question + context
+   • Outputs: findings + sources + confidence score
+   • Authority: Can use web_search, retrieve_docs tools
+   
+2. Writer  
+   • Invoke when: Synthesis or drafting is required
+   • Inputs: source material + target format + style preferences
+   • Outputs: structured draft + citations + word count
+   • Authority: No tool access (synthesis only)
+   
+3. Critic
+   • Invoke when: Quality validation or improvement is required
+   • Inputs: draft + evaluation criteria
+   • Outputs: feedback + recommendations + approval status
+   • Authority: Can use quality_check tool
+
+IMPORTANT: You delegate to ONE worker at a time. Wait for results before proceeding.
+```
+
+**Key Elements:**
+- Worker name and specialization
+- Clear invocation criteria ("when to use")
+- Explicit input/output contracts
+- Tool authority boundaries
+- Sequential delegation rule
+
+#### **Delegation Protocol (Mandatory)**
+
+Add this to the supervisor's Policy/Routing block:
+
+```
+# POLICY / ROUTING (Supervisor)
+
+Follow this delegation protocol:
+
+1. Analyze user request and identify required capabilities
+2. Determine if decomposition is needed (single worker vs multi-step)
+3. Select appropriate worker based on capability requirements
+4. Construct handoff with explicit task, context, and success criteria
+5. Delegate to ONE worker (do not parallelize without explicit approval)
+6. Validate worker output against success criteria
+7. Either:
+   a) Synthesize results and return to user, OR
+   b) Delegate next subtask to another worker, OR
+   c) Request clarification from user if blocked
+8. Terminate when user's original request is fully satisfied
+
+CRITICAL RULES:
+• Do NOT perform worker tasks yourself (no direct tool use)
+• Do NOT delegate the same subtask twice (check completed_subtasks)
+• Do NOT delegate without success_criteria
+• Do NOT infinite loop (max 2 re-delegations per subtask)
+• You OWN final synthesis—combine worker outputs into coherent response
+```
+
+**Why This Matters:**
+- Prevents supervisors from "doing the work" instead of coordinating
+- Stops infinite delegation loops
+- Makes success criteria mandatory
+- Establishes clear termination conditions
+
+---
+
+### Handoff Contract (Supervisor → Worker)
+
+**Explicit Format (JSON):**
+
+Every delegation from supervisor to worker MUST use this exact structure:
+
+```json
+{
+  "worker": "researcher",
+  "task": "Find the 3 most recent academic papers on quantum error correction",
+  "context": "User is a PhD student researching fault-tolerant quantum computing. Technical depth expected.",
+  "success_criteria": "Return at least 3 papers published after 2023, with abstracts and relevance scores"
+}
+```
+
+**Field Requirements:**
+
+| Field | Required? | Description | Failure Behavior |
+|-------|-----------|-------------|------------------|
+| `worker` | Yes | Exact worker name from registry | Hard fail (unknown worker) |
+| `task` | Yes | Explicit, actionable task description | Hard fail (ambiguous delegation) |
+| `context` | No (but recommended) | ONLY information needed for this task | Worker proceeds without context |
+| `success_criteria` | Yes | Conditions for task completion | Worker cannot validate success |
+
+**Contract Rules:**
+
+1. **No Implicit Context** — If supervisor knows something relevant, include it in `context`. Workers cannot read supervisor's "mind" (state).
+2. **No Shared Assumptions** — Worker must be able to complete task with ONLY the handoff content (plus its tools).
+3. **No Delegation Without Success Criteria** — Worker must know when to stop and return control.
+
+**Anti-Pattern Example:**
+
+❌ **Wrong (Vague Handoff):**
+```json
+{
+  "worker": "researcher",
+  "task": "Do some research"
+}
+```
+
+✅ **Correct (Explicit Handoff):**
+```json
+{
+  "worker": "researcher", 
+  "task": "Research the impact of LLM context window size on retrieval accuracy",
+  "context": "User is building a RAG system and needs to decide between 8K and 128K context models",
+  "success_criteria": "Return 3-5 sources comparing performance across context sizes, with quantitative results if available"
+}
+```
+
+---
+
+### Worker Prompt Contract
+
+Workers are specialists. They execute assigned tasks within strict boundaries and always return control to the supervisor.
+
+#### **Scope Boundaries (Required in Worker Prompts)**
+
+Add this to EVERY worker's Constraints block:
+
+```
+# CONSTRAINTS (Worker-Specific)
+
+RESPONSIBILITIES:
+• Execute the assigned task using your specialized tools/knowledge
+• Use tools within your authority scope only
+• Return structured results with required fields
+• Provide confidence scores when uncertain
+• Explain reasoning when asked
+
+NON-RESPONSIBILITIES (You MUST NOT):
+• Delegate to other agents (only supervisor delegates)
+• Make final user-facing decisions (supervisor owns synthesis)
+• Modify shared orchestration state directly
+• Retry indefinitely (max 1 retry per tool call, then escalate)
+• Assume context not explicitly provided in your task
+```
+
+**Why Explicit Non-Responsibilities?**
+- Prevents workers from "going rogue" and delegating
+- Stops workers from making decisions outside their scope
+- Forces escalation when blocked (instead of silent failure)
+
+#### **Worker Input Format**
+
+Workers receive tasks in this structure:
+
+```json
+{
+  "task": "Research recent papers on quantum error correction",
+  "context": "User is a PhD student, technical depth expected",
+  "success_criteria": "Return at least 3 papers from 2023+, with abstracts"
+}
+```
+
+Workers MUST validate:
+- `task` is present and actionable
+- `success_criteria` is clear
+
+If either is missing or ambiguous → return `needs_more_info` status.
+
+#### **Worker Output Format (Required)**
+
+Workers MUST return this structure:
+
+```json
+{
+  "status": "complete | needs_more_info | out_of_scope",
+  "findings": "Your research results, analysis, or draft content",
+  "sources": ["source1", "source2"],
+  "confidence": 0.85,
+  "notes_for_supervisor": "Optional context for supervisor synthesis"
+}
+```
+
+**Field Definitions:**
+
+| Field | Required? | Description |
+|-------|-----------|-------------|
+| `status` | Yes | Must be one of: `complete`, `needs_more_info`, `out_of_scope` |
+| `findings` | Yes (if status=complete) | The actual work product |
+| `sources` | No | Citations, references, tool call IDs |
+| `confidence` | No (recommended) | 0.0-1.0 confidence in findings |
+| `notes_for_supervisor` | No | Explanations, caveats, alternative approaches |
+
+**Status Semantics:**
+
+- **`complete`** → Task succeeded, findings are valid, supervisor can proceed
+- **`needs_more_info`** → Task is ambiguous or missing inputs (MUST explain what's needed in `notes_for_supervisor`)
+- **`out_of_scope`** → Task violates worker's responsibility boundaries (MUST cite specific constraint violated)
+
+**Enforcement Rules:**
+
+1. Workers MUST return control explicitly (never assume continuation)
+2. `needs_more_info` MUST explain what is missing
+3. `out_of_scope` MUST cite violated responsibility boundary
+4. Workers cannot return `status: "delegated"` (only supervisors delegate)
+
+**Example Worker Returns:**
+
+**Success:**
+```json
+{
+  "status": "complete",
+  "findings": "Found 3 papers: [Paper summaries...]",
+  "sources": ["arXiv:2024.12345", "arXiv:2024.67890", "arXiv:2023.11111"],
+  "confidence": 0.9,
+  "notes_for_supervisor": "All papers from top-tier venues (Nature, Science)"
+}
+```
+
+**Blocked (needs clarification):**
+```json
+{
+  "status": "needs_more_info",
+  "findings": "",
+  "notes_for_supervisor": "Query 'quantum error correction' is broad. Need specific focus: surface codes? Topological codes? Experimental implementations?"
+}
+```
+
+**Out of scope:**
+```json
+{
+  "status": "out_of_scope",
+  "findings": "",
+  "notes_for_supervisor": "Task requires writing code. Researcher authority is search and analysis only. Recommend delegating to Coder agent."
+}
+```
+
+---
+
+### Shared State Visibility Policy
+
+**Problem:** Injecting full shared state into every agent prompt wastes tokens and leaks information across boundaries.
+
+**Solution:** Agents reference ONLY the shared state fields they require.
+
+#### **Core Rules**
+
+1. **Minimal Injection** — Agents may reference ONLY shared state fields explicitly listed in their contract
+2. **Completion Awareness** — Workers MUST check `completed_subtasks` before starting work (prevents duplication)
+3. **No Full Dumps** — Full shared state must NEVER be injected into all prompts
+4. **Supervisor Owns Mutation** — Only supervisor mutates shared coordination state (workers write to their output fields only)
+
+#### **Visibility Table Template**
+
+Define what each agent can see:
+
+| Agent Role | Allowed Shared Fields | Forbidden Fields | Rationale |
+|------------|----------------------|------------------|-----------|
+| **Supervisor** | All fields (read/write) | None | Orchestrator needs full visibility |
+| **Researcher** | `user_query`, `completed_subtasks`, `research_findings` (write) | `draft_report`, `critic_feedback` | Researcher doesn't need downstream results |
+| **Writer** | `user_query`, `research_findings` (read), `draft_report` (write) | `critic_feedback` | Writer shouldn't see critique before drafting |
+| **Critic** | `draft_report` (read), `critic_feedback` (write) | `research_findings` | Critic evaluates draft, not source material |
+
+**Implementation Pattern:**
+
+```python
+def inject_visible_state(agent_name: str, full_state: dict) -> dict:
+    """Filter state based on agent visibility policy"""
+    
+    visibility_rules = {
+        "supervisor": full_state,  # Sees everything
+        "researcher": {
+            "user_query": full_state.get("user_query"),
+            "completed_subtasks": full_state.get("completed_subtasks", [])
+        },
+        "writer": {
+            "user_query": full_state.get("user_query"),
+            "research_findings": full_state.get("research_findings"),
+            "completed_subtasks": full_state.get("completed_subtasks", [])
+        },
+        "critic": {
+            "draft_report": full_state.get("draft_report"),
+            "completed_subtasks": full_state.get("completed_subtasks", [])
+        }
+    }
+    
+    return visibility_rules.get(agent_name, {})
+```
+
+**Cross-Reference:**
+This directly implements **Context Budgeting & Anti-Bloat Guardrails** from Phase 2 at the multi-agent level.
+
+---
+
+### Loop Guards & Duplication Prevention
+
+**Problem:** Without guards, multi-agent systems can loop infinitely or duplicate work.
+
+**Solution:** Enforce explicit termination rules and duplicate detection.
+
+#### **Required Guards**
+
+**1. Max Re-Delegations Per Subtask**
+
+```
+LOOP GUARD RULE:
+• Supervisor may re-delegate a failed subtask at most 2 times
+• After 2 failures → escalate to user or re-scope task
+• Track re-delegation count in shared state
+```
+
+**Implementation (State Field):**
+```python
+state["re_delegation_count"] = {
+    "research_quantum_papers": 0,  # First attempt
+    "draft_report": 1,              # First retry
+}
+
+# Before re-delegating:
+if state["re_delegation_count"].get(subtask_id, 0) >= 2:
+    # Escalate instead of retry
+    return {"status": "escalate_to_user", "reason": "Task failed twice"}
+```
+
+**2. Duplicate Subtask Detection**
+
+```
+DUPLICATION GUARD:
+• Before delegating, supervisor checks completed_subtasks
+• If subtask already completed → skip or use cached result
+• Workers check completed_subtasks before starting work
+```
+
+**Implementation:**
+```python
+# Supervisor checks before delegating
+if "research_quantum_papers" in state.get("completed_subtasks", []):
+    # Already done, use existing results
+    return state["research_findings"]
+
+# Worker checks before executing
+if current_task_id in state.get("completed_subtasks", []):
+    return {
+        "status": "complete",
+        "findings": state.get(f"{current_task_id}_result"),
+        "notes_for_supervisor": "Task already completed, returning cached result"
+    }
+```
+
+**3. Escalation Rule**
+
+```
+ESCALATION RULE:
+• If worker returns needs_more_info twice → supervisor escalates
+• Escalation options:
+  a) Ask user for clarification
+  b) Re-scope task with different success criteria
+  c) Abort subtask and proceed without it (if optional)
+```
+
+**Example:**
+```python
+if state["needs_more_info_count"].get(worker_name, 0) >= 2:
+    # Don't retry again, escalate
+    return {
+        "action": "ask_user",
+        "question": f"{worker_name} is blocked. {state['last_worker_notes']}"
+    }
+```
+
+#### **Termination Rules**
+
+**For Supervisors:**
+1. Terminate when user's original request success criteria are met
+2. Terminate after max_steps reached (e.g., 10 delegations)
+3. Terminate if all workers return `out_of_scope`
+
+**For Workers:**
+1. NEVER self-loop (execute task once, return control)
+2. NO silent retries (max 1 retry, then return `needs_more_info`)
+3. MUST return one of: `complete`, `needs_more_info`, `out_of_scope`
+
+**Supervisor Termination Check:**
+```python
+def should_terminate(state: dict) -> bool:
+    # Success: all subtasks complete and final synthesis done
+    if state.get("final_response") and state.get("approval_status") == "approved":
+        return True
+    
+    # Failure: too many steps
+    if state.get("delegation_count", 0) >= 10:
+        return True
+    
+    # Failure: all workers blocked
+    if all(w["status"] == "out_of_scope" for w in state.get("worker_responses", [])):
+        return True
+    
+    return False
+```
+
+---
+
+### Multi-Agent Prompt Testing
+
+**Principle:** Treat supervisor + workers as a contract system. Test handoffs independently of model quality.
+
+#### **Required Test Categories**
+
+**1. Handoff Format Validation**
+
+Test that delegations conform to the handoff contract:
+
+```python
+def test_handoff_format():
+    """Supervisor must use exact handoff structure"""
+    supervisor_output = supervisor_agent.delegate(state)
+    
+    # Validate structure
+    assert "worker" in supervisor_output
+    assert "task" in supervisor_output
+    assert "success_criteria" in supervisor_output
+    
+    # Validate worker exists
+    assert supervisor_output["worker"] in ["researcher", "writer", "critic"]
+    
+    # Validate non-empty fields
+    assert len(supervisor_output["task"]) > 0
+    assert len(supervisor_output["success_criteria"]) > 0
+```
+
+**2. Responsibility Boundary Enforcement**
+
+Test that workers respect their constraints:
+
+```python
+def test_worker_no_delegation():
+    """Workers must not attempt to delegate to other agents"""
+    worker_output = researcher_agent.execute({
+        "task": "Research X",
+        "context": "...",
+        "success_criteria": "..."
+    })
+    
+    # Worker output must not contain delegation
+    assert "delegate" not in worker_output.get("notes_for_supervisor", "").lower()
+    assert worker_output["status"] in ["complete", "needs_more_info", "out_of_scope"]
+```
+
+**3. Duplicate Work Prevention**
+
+Test that completed_subtasks prevents re-execution:
+
+```python
+def test_duplicate_detection():
+    """Completed subtasks should be skipped"""
+    state = {
+        "completed_subtasks": ["research_quantum"],
+        "research_quantum_result": "cached findings"
+    }
+    
+    # Supervisor should not re-delegate
+    action = supervisor.decide_next_action(state)
+    assert action["subtask_id"] != "research_quantum"
+    
+    # Or if delegated anyway, worker should return cached
+    if action["subtask_id"] == "research_quantum":
+        result = worker.execute(state)
+        assert "cached" in result["notes_for_supervisor"].lower()
+```
+
+**4. Loop Guard Triggering**
+
+Test that re-delegation limits are enforced:
+
+```python
+def test_max_redelegations():
+    """Supervisor must escalate after 2 failed attempts"""
+    state = {
+        "re_delegation_count": {"research_task": 2}
+    }
+    
+    # Should escalate, not retry again
+    action = supervisor.handle_worker_failure(state, "research_task")
+    assert action["type"] in ["escalate_to_user", "abort_subtask"]
+```
+
+**5. Supervisor Synthesis Correctness**
+
+Test that supervisor combines worker outputs (not just forwards them):
+
+```python
+def test_supervisor_synthesis():
+    """Supervisor must synthesize, not just forward worker output"""
+    state = {
+        "research_findings": "Finding A",
+        "draft_report": "Report B",
+        "critic_feedback": "Feedback C"
+    }
+    
+    final_response = supervisor.synthesize(state)
+    
+    # Should reference all three inputs
+    assert "Finding A" in final_response or references_findings(final_response)
+    assert "Report B" in final_response or references_draft(final_response)
+    assert "Feedback C" in final_response or references_critique(final_response)
+    
+    # Should not be identical to any single worker output
+    assert final_response != state["research_findings"]
+    assert final_response != state["draft_report"]
+```
+
+#### **Testing Guidance**
+
+**Use Mocked Worker Responses:**
+```python
+class MockWorker:
+    def execute(self, handoff):
+        return {
+            "status": "complete",
+            "findings": "Mocked findings",
+            "confidence": 0.8
+        }
+
+# Test supervisor logic without running real workers
+supervisor.researcher = MockWorker()
+supervisor.writer = MockWorker()
+```
+
+**Test Contract Violations:**
+```python
+def test_handoff_missing_success_criteria():
+    """Handoff without success_criteria should fail validation"""
+    invalid_handoff = {
+        "worker": "researcher",
+        "task": "Do research"
+        # Missing success_criteria
+    }
+    
+    with pytest.raises(HandoffContractViolation):
+        validate_handoff(invalid_handoff)
+```
+
+**Test State Visibility:**
+```python
+def test_worker_state_visibility():
+    """Workers should only see allowed state fields"""
+    full_state = {
+        "user_query": "...",
+        "research_findings": "...",
+        "draft_report": "...",  # Should NOT be visible to researcher
+    }
+    
+    researcher_state = inject_visible_state("researcher", full_state)
+    
+    assert "user_query" in researcher_state
+    assert "draft_report" not in researcher_state
+```
+
+---
+
+**Remember:** Multi-agent prompt standards are contracts, not suggestions. Every handoff is a potential failure point. Explicit contracts, visibility policies, and loop guards transform brittle multi-agent systems into reliable orchestrations. Test handoffs like you test APIs—because that's exactly what they are.
+
+⸻
+
 ## State Safety: PII, Retention, and Redaction
 
 **Concept Capsule:**
@@ -5659,6 +6252,221 @@ def search_financial_news(query: str) -> List[Dict]:
 ```
 
 Remember: **Your docstring is a conversation with the AI**. Write it as if you're explaining the tool to a smart colleague who needs to know exactly when and how to use it.
+
+---
+
+### Appendix A3: Multi-Agent Prompt Templates
+
+These templates implement the supervisor-worker standards from "Multi-Agent Prompt Standards (Supervisor–Worker)" in the Multi-Agent State Contracts section. Use these as starting points for hierarchical multi-agent systems.
+
+**A3a. Supervisor Prompt Template (Hierarchical MAS)**
+
+```
+# IDENTITY
+You are a Supervisor Agent coordinating specialist worker agents.
+Your role: decompose user requests, delegate to appropriate workers, validate results, and synthesize final responses.
+You DO NOT execute tasks yourself—you coordinate.
+
+# CAPABILITIES
+
+You coordinate the following specialist agents:
+
+1. {Worker_1_Name}
+   • Invoke when: {Worker_1_Invocation_Criteria}
+   • Inputs: {Worker_1_Inputs}
+   • Outputs: {Worker_1_Outputs}
+   • Authority: {Worker_1_Tool_Access}
+   
+2. {Worker_2_Name}
+   • Invoke when: {Worker_2_Invocation_Criteria}
+   • Inputs: {Worker_2_Inputs}
+   • Outputs: {Worker_2_Outputs}
+   • Authority: {Worker_2_Tool_Access}
+   
+3. {Worker_3_Name}
+   • Invoke when: {Worker_3_Invocation_Criteria}
+   • Inputs: {Worker_3_Inputs}
+   • Outputs: {Worker_3_Outputs}
+   • Authority: {Worker_3_Tool_Access}
+
+IMPORTANT: You delegate to ONE worker at a time. Wait for results before proceeding.
+
+# CONSTRAINTS
+- Do NOT perform worker tasks yourself (no direct tool use)
+- Do NOT delegate the same subtask twice (check completed_subtasks)
+- Do NOT delegate without success_criteria
+- Do NOT infinite loop (max 2 re-delegations per subtask)
+- You OWN final synthesis—combine worker outputs into coherent response
+- Follow handoff contract format strictly (see POLICY)
+
+# POLICY / ROUTING
+
+Follow this delegation protocol:
+
+1. Analyze user request and identify required capabilities
+2. Determine if decomposition is needed (single worker vs multi-step)
+3. Select appropriate worker based on capability requirements
+4. Construct handoff with explicit task, context, and success criteria
+5. Delegate to ONE worker (do not parallelize without explicit approval)
+6. Validate worker output against success criteria
+7. Either:
+   a) Synthesize results and return to user, OR
+   b) Delegate next subtask to another worker, OR
+   c) Request clarification from user if blocked
+8. Terminate when user's original request is fully satisfied
+
+**Handoff Contract Format:**
+```json
+{
+  "worker": "<worker_name>",
+  "task": "<explicit actionable task>",
+  "context": "<only information needed for this task>",
+  "success_criteria": "<conditions for task completion>"
+}
+```
+
+**Escalation Rules:**
+- If worker returns needs_more_info twice → ask user for clarification
+- If re_delegation_count reaches 2 → escalate or abort subtask
+- If all workers return out_of_scope → return error to user
+
+# CONTEXT (Injected at runtime)
+User request: {user_request}
+Completed subtasks: {completed_subtasks}
+Re-delegation counts: {re_delegation_counts}
+Max delegation steps: {max_steps}
+
+# FORMAT
+When delegating:
+Return handoff contract JSON (see POLICY).
+
+When synthesizing final response:
+Return structured output:
+{
+  "status": "complete",
+  "response": "<synthesized answer combining worker outputs>",
+  "sources": ["<worker_1 findings>", "<worker_2 findings>"],
+  "delegation_count": <total delegations made>
+}
+```
+
+**Placeholder Population:**
+- `{Worker_X_Name}`: e.g., "Researcher", "Writer", "Critic"
+- `{Worker_X_Invocation_Criteria}`: e.g., "User needs external information"
+- `{Worker_X_Inputs}`: e.g., "research question + context"
+- `{Worker_X_Outputs}`: e.g., "findings + sources + confidence score"
+- `{Worker_X_Tool_Access}`: e.g., "web_search, retrieve_docs"
+- `{max_steps}`: e.g., "10" (total delegation limit)
+
+---
+
+**A3b. Worker Prompt Template (Hierarchical MAS)**
+
+```
+# IDENTITY
+You are {Worker_Name}, a specialist agent focused on {Worker_Specialty}.
+You execute tasks delegated by the Supervisor and return results.
+You DO NOT delegate to other agents—that's the Supervisor's job.
+
+# CAPABILITIES
+You can use these tools:
+{tool_catalog}
+
+Tool selection guidance:
+- Use {tool_1} when: {tool_1_criteria}
+- Use {tool_2} when: {tool_2_criteria}
+
+# CONSTRAINTS
+
+RESPONSIBILITIES:
+• Execute the assigned task using your specialized tools/knowledge
+• Use tools within your authority scope only
+• Return structured results with required fields
+• Provide confidence scores when uncertain
+• Explain reasoning when asked
+
+NON-RESPONSIBILITIES (You MUST NOT):
+• Delegate to other agents (only supervisor delegates)
+• Make final user-facing decisions (supervisor owns synthesis)
+• Modify shared orchestration state directly
+• Retry indefinitely (max 1 retry per tool call, then escalate)
+• Assume context not explicitly provided in your task
+
+# POLICY / ROUTING
+
+When you receive a task:
+
+1. Validate handoff format:
+   - Check that `task` is present and actionable
+   - Check that `success_criteria` is clear
+   - If either is missing/ambiguous → return needs_more_info
+   
+2. Check duplication:
+   - If task already in completed_subtasks → return cached result
+   
+3. Execute task:
+   - Use your tools to complete the task
+   - Stop when success_criteria are met
+   - Max 1 retry per tool call (then escalate)
+   
+4. Return control to supervisor:
+   - ALWAYS return one of: complete, needs_more_info, out_of_scope
+   - Include findings (if complete) or explanation (if blocked)
+
+# CONTEXT (Injected at runtime)
+Task: {task}
+Context: {context}
+Success criteria: {success_criteria}
+Completed subtasks: {completed_subtasks}
+
+# FORMAT
+
+You MUST return this structure:
+
+```json
+{
+  "status": "complete | needs_more_info | out_of_scope",
+  "findings": "<your work product (if status=complete)>",
+  "sources": ["<citations or tool call IDs>"],
+  "confidence": 0.85,
+  "notes_for_supervisor": "<optional context for supervisor synthesis>"
+}
+```
+
+**Status Semantics:**
+- **complete** → Task succeeded, findings are valid, supervisor can proceed
+- **needs_more_info** → Task is ambiguous or missing inputs (MUST explain what's needed)
+- **out_of_scope** → Task violates your responsibility boundaries (MUST cite violated constraint)
+
+**Critical Rules:**
+- Return control explicitly (never assume continuation)
+- needs_more_info MUST explain what is missing
+- out_of_scope MUST cite violated responsibility boundary
+- You cannot return status: "delegated" (only supervisors delegate)
+```
+
+**Placeholder Population:**
+- `{Worker_Name}`: e.g., "Researcher", "Writer", "Quality Checker"
+- `{Worker_Specialty}`: e.g., "finding and analyzing external information"
+- `{tool_catalog}`: e.g., "web_search, retrieve_docs, summarize"
+- `{task}`: Runtime injection from handoff contract
+- `{context}`: Runtime injection from handoff contract
+- `{success_criteria}`: Runtime injection from handoff contract
+
+---
+
+**When to Use A3a vs A3b:**
+- **Use A3a** for: Orchestrator/coordinator agents in multi-agent systems
+- **Use A3b** for: Specialist worker agents (Researcher, Writer, Critic, etc.)
+- **Do NOT use A3a/A3b** for: Single-agent systems (use A1 or A1b instead)
+
+**Customization Checklist:**
+1. Replace all `{placeholders}` with actual values for your domain
+2. Update worker registry (A3a) with your actual workers
+3. Define clear invocation criteria for each worker
+4. Specify tool access permissions for each worker
+5. Set max_steps and re_delegation limits based on your use case
+6. Test handoff contracts independently (see Multi-Agent Prompt Testing)
 
 ---
 
