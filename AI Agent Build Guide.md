@@ -1795,6 +1795,174 @@ def recover_state(task_id: str) -> AgentState:
 
 ---
 
+## Addendum: Hybrid Persistence Under Log/Event Divergence
+
+### Status: Canonical Extension
+### Domain: Persistence · Observability · Governance
+### Risk Class: Decision Integrity Failure
+
+#### 1) Problem Statement
+Hybrid persistence (checkpoint + event replay) is necessary for production-grade agent systems. It is not sufficient.
+
+If logged events diverge from actual system behavior, replay can produce coherent reconstructions — but false histories.
+This is a decision integrity failure mode.
+
+Hybrid persistence must be hardened against:
+- Temporal drift
+- Semantic abstraction distortion
+- Model/tool version drift
+- Non-deterministic execution
+- Partial capture and silent data loss
+
+#### 2) Failure Mode: Log/Event Divergence
+Log/Event Divergence occurs when the recorded event stream does not faithfully represent real execution.
+
+Manifestations:
+- Reordered events
+- Missing events
+- Phantom events
+- Semantically distorted events
+- Replay inconsistencies
+
+If unmitigated, replay becomes narrative reconstruction — not truth recovery.
+
+#### 3) Hybrid Persistence — Integrity-Centric Definition
+Integrity-Hardened Hybrid Persistence requires:
+1. Periodic snapshots of authoritative state
+2. Append-only, ordered event logs between checkpoints
+3. Deterministic replay from the last checkpoint
+4. Replay validation against invariants
+
+Hybrid persistence is bounded forensic recoverability.
+
+#### 4) Required Integrity Controls
+
+**4.1 Event Identity Discipline**
+Every event must include:
+- event_id (UUID)
+- task_id
+- monotonic_sequence_number
+- schema_version
+- timestamp_wall_clock
+- timestamp_monotonic
+
+Wall-clock time is not sufficient for ordering.
+
+**4.2 Temporal Coherence Validation**
+During replay:
+- enforce strictly increasing sequence numbers
+- detect timestamp inversions
+- detect duplicate sequence IDs
+- detect sequence gaps
+
+If chronology collapse is detected:
+- halt replay and signal divergence
+- do not silently repair history
+
+**4.3 Schema Version Locking**
+Both checkpoints and events must carry schema versions.
+
+Replay rules:
+- schema mismatch triggers migration layer
+- no silent coercion
+- derived fields are recomputed, not trusted
+
+**4.4 Deterministic Replay Anchors**
+For non-deterministic components (LLMs, stochastic tools), store:
+- model version
+- prompt/template hash
+- tool version
+- tool input hash
+- tool output hash (if feasible)
+
+Replay should rehydrate recorded outputs when required for deterministic reproduction.
+
+**4.5 Multi-Layer Trace Correlation**
+Capture and correlate:
+- agent decision events
+- tool invocation spans
+- model inference spans
+- external system acknowledgments
+
+Single-channel truth is fragile.
+
+**4.6 Invariant Enforcement**
+Replay must validate:
+- state transitions obey the declared state machine
+- required fields present
+- derived fields match recomputation
+- no illegal backward transitions
+
+Replay without invariants is simulation, not verification.
+
+#### 5) Divergence Detection Protocol
+If any of the following are detected:
+- missing event
+- phantom event
+- schema mismatch
+- temporal inversion
+- invariant violation
+
+Then:
+1. freeze replay
+2. emit divergence alert
+3. persist forensic snapshot
+4. escalate to integrity handler
+
+Fail-transparent behavior is required.
+
+#### 6) Operational Doctrine
+Logging is not diagnostic metadata. It is operational infrastructure.
+
+Loss of record integrity causes:
+- authority drag
+- investigative failure
+- accountability distortion
+- trust erosion
+- cognitive overload
+
+Decision systems can degrade faster from record instability than from model error.
+
+#### 7) Integrity Maturity Model (Hybrid Systems)
+- Level 1: Minimal logging (ad hoc; no replay guarantees)
+- Level 2: Structured logging (schema defined; no replay validation)
+- Level 3: Event-sourced (replay possible; no integrity enforcement)
+- Level 4: Integrity-hardened hybrid (checkpoint + ordered events + invariant validation)
+- Level 5: Decision-grade integrity (multi-layer correlation + deterministic anchors + governance enforcement)
+
+Production agent systems targeting critical operations should meet Level 4 minimum.
+
+#### 8) Reference Implementation Pattern
+Checkpoint interval:
+- time-based (every N minutes) OR
+- event-count based (every M events)
+
+Replay procedure:
+1. load latest checkpoint
+2. validate checkpoint schema
+3. fetch events > checkpoint sequence
+4. validate event ordering
+5. replay with invariant checks
+6. recompute derived fields
+7. confirm state hash integrity (optional)
+
+#### 9) Non-Negotiables
+- no silent log mutation
+- no in-place event editing
+- no replay without validation
+- no dependence on live model behavior for historical reconstruction
+- no assumption that logs equal truth without cross-layer verification
+
+#### 10) Summary
+Hybrid persistence is the correct pattern. But hybrid without integrity controls becomes confidence theater.
+
+Checkpoint + event stream is the mechanism.
+Integrity enforcement is the doctrine.
+
+You're not building resilient agent systems if you can't reconstruct truth under pressure.
+
+---
+
 ### Recommended Checkpoint Cadence
 
 How often should you checkpoint? It depends on your workflow characteristics:
