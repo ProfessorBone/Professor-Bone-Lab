@@ -2533,6 +2533,9 @@ Before deploying checkpoint/replay logic:
 
 ## Observability: Mapping State Updates to Telemetry (Without State Dumps)
 
+**Cross-Reference (Foundation):**
+Before implementing observability, ensure you have defined computable performance metrics, mapped required data fields to sensors/tool outputs, and specified eval + safety constraints. See: [Performance Engineering: From Metrics to Telemetry](#performance-engineering-from-metrics-to-telemetry).
+
 **Concept Capsule:**
 Every agent state update creates an observability decision: log it, ignore it, or something in between. Dumping full state at every step creates noise, bloats storage, and obscures real issues. This module teaches taxonomy-driven telemetry — map each state update category to the right observability primitive, capture only what matters, and build traces that reveal agent behavior without drowning in data.
 
@@ -6066,6 +6069,9 @@ class Tier2Agent:
 ⸻
 
 ## Tier 3 · Advanced Agent (Multi-Agent + Planning + Observability)
+
+**Prerequisite Note:**
+Tier 3 observability is only meaningful if your system-level and node-level metrics are computable and traceable. Confirm your metric formulas, required fields, telemetry span taxonomy, eval plan (offline/online), and safety metrics first. Reference: [Performance Engineering: From Metrics to Telemetry](#performance-engineering-from-metrics-to-telemetry).
 
 ![Agent Orchestrator - Agent Control Hub](images/agent_orchestrator_control_hub.png)
 
