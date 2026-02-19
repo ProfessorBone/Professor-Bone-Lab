@@ -70,6 +70,7 @@ The AGI Architecture Blueprint, 9-Phase Roadmap, and Systems Diagrams are advanc
 • Observability: Mapping State Updates to Telemetry (Without State Dumps)
 • System Prompt Architecture: Modular Prompt Blocks + State Integration
 • Multi-Agent State Contracts & Handoff Validation
+• Drift and Boundary Discipline in Agentic Systems
 • State Safety: PII, Retention, and Redaction
 • Tier 0 · Prereqs & Principles
 • Tier 1 · Basic Agent (MVP Chat + Single Tool)
@@ -673,6 +674,8 @@ If a metric cannot be computed from available data, traced through the system, e
 
 This section converts "Performance" from a conceptual requirement into an engineering discipline.
 
+**See also:** [Drift and Boundary Discipline](#drift-and-boundary-discipline-in-agentic-systems) — how metrics can reinforce drift if not governed with process-integrity checks.
+
 ---
 
 ### 1️⃣ The Performance Lifecycle
@@ -1016,6 +1019,8 @@ Not all state is created equal. Understanding the difference between node-local 
 • Design state schemas that prevent bloat and ownership conflicts
 • Apply scope and lifetime rules to single-agent and multi-agent architectures
 • Recognize and avoid common anti-patterns in state management
+
+**See also:** [Drift and Boundary Discipline](#drift-and-boundary-discipline-in-agentic-systems) — how scope violations at boundaries compound into systemic drift.
 
 ---
 
@@ -1461,6 +1466,8 @@ Memory systems can make agents smarter — or catastrophically slower if mismana
 • Implement pointer-replace patterns to avoid context bloat
 • Design pruning strategies that preserve learning while controlling growth
 • Build state schemas that separate working sets from memory references
+
+**See also:** [Drift and Boundary Discipline](#drift-and-boundary-discipline-in-agentic-systems) — how memory-qualifying filter failures allow drift to become planning context.
 
 ---
 
@@ -4980,6 +4987,306 @@ def test_worker_state_visibility():
 ---
 
 **Remember:** Multi-agent prompt standards are contracts, not suggestions. Every handoff is a potential failure point. Explicit contracts, visibility policies, and loop guards transform brittle multi-agent systems into reliable orchestrations. Test handoffs like you test APIs—because that's exactly what they are.
+
+**See also:** [Drift and Boundary Discipline](#drift-and-boundary-discipline-in-agentic-systems) — how contract violations and boundary drift compound into systemic misalignment.
+
+⸻
+
+## Drift and Boundary Discipline in Agentic Systems
+
+**Concept Capsule:**
+Small inconsistencies at agent boundaries compound into systemic drift.
+
+In multi-agent systems, failure does not scale linearly with agent count. It scales with the number of transformation boundaries and reinforcement cycles.
+
+This section explains:
+- Where drift enters agentic systems
+- Why drift scales non-linearly
+- How existing primitives (state contracts, edge guards, memory filters, metrics) contain it
+- How to add an Integrity Monitor to govern drift at runtime
+
+**Learning Objectives**
+• Identify transformation boundaries where drift can enter
+• Reason about why multi-agent drift scales combinatorially
+• Apply boundary discipline patterns using contracts and edge guards
+• Design telemetry that detects reinforcement-driven misalignment
+• Implement a Pre-Scale Checklist before increasing agent complexity
+
+---
+
+### Where Drift Enters
+
+Drift does not originate from "bad models." It enters at transformation boundaries.
+
+In this Guide's terminology, boundaries include:
+
+| Boundary Type | Example | Existing Mechanism |
+|---|---|---|
+| Node-local → agent-local state | Planner writes `approvalStatus` | [State Scope & Ownership](#state-scope--ownership-local-vs-global-state) |
+| Agent-local → shared state | Writer updates shared coordination state | [Multi-Agent State Contracts](#multi-agent-state-contracts--handoff-validation) |
+| Tool output → state | Search tool returns structured data | Edge Guards |
+| State → memory | Memory write after task completion | [Memory Lifecycle](#memory-lifecycle--anti-bloat-patterns) (memory-qualifying filter) |
+| Artifact → metric | Dashboard aggregates agent outputs | [Performance Engineering](#performance-engineering-from-metrics-to-telemetry) |
+
+Each of these boundaries already exists in the architecture. Each is a potential drift surface.
+
+Without validation, drift never stays local. Every boundary becomes a multiplier.
+
+---
+
+### Non-Linear Scaling (Risk Intuition)
+
+We use simple back-of-the-envelope reasoning.
+
+If `n` agents interact and the graph is moderately connected, directed boundaries scale roughly with `n(n−1)`. Each boundary hosts multiple drift modes (schema mismatch, prompt divergence, distribution shift, metric misalignment, memory encoding error).
+
+Even if each boundary has only a few plausible drift modes, combined system states grow quickly.
+
+This is not a formal theorem. It is a practical warning:
+> Adding agents increases drift surfaces faster than it increases coordination benefit unless validation scales with it.
+
+#### Concrete Example
+
+Three-agent pipeline:
+Planner → Researcher → Writer
+
+Shared coordination field:
+```json
+{ "approvalStatus": "approved" }
+```
+
+If Planner writes `"aproved"` (typo):
+- Researcher routes incorrectly.
+- Writer skips review.
+- No contract violation is raised.
+
+One local typo bypasses orchestration logic. Without edge guards, propagation occurs.
+
+---
+
+### Drift Propagation in the Memory Lifecycle
+
+Aligning with the [Memory Lifecycle Flow](#memory-lifecycle--anti-bloat-patterns):
+
+Raw input → Tool ingestion → Node-local transformation → Agent-local/shared state update → Memory-qualifying filter → Memory write → Future planning
+
+If a misinterpretation passes state contract, edge guard, and memory-qualifying filter, it is committed to long-term memory. At that point, drift is no longer local. It becomes planning context.
+
+This is the primary mechanism by which small misinterpretations become systemic behavior.
+
+---
+
+### Propagation vs Amplification
+
+#### Propagation
+
+An error spreads across dependency graph nodes.
+
+Example:
+- Researcher writes malformed citation object.
+- Writer formats incorrectly.
+- Reviewer validates wrong structure.
+- Final output passes.
+
+Drift has spread across agents.
+
+#### Amplification
+
+Errors increase in magnitude during transformation.
+
+Example:
+- Slightly overconfident relevance score.
+- Writer omits uncertainty qualifier.
+- Metrics count "accurate response."
+- Eval dataset captures artifact as ground truth.
+
+Confidence inflation has occurred.
+
+#### Interaction Effects
+
+Independent local drifts align:
+- Slightly permissive contract
+- Slightly optimistic confidence threshold
+- Slightly compressed memory summary
+
+Combined, they bypass safety gate.
+
+Unit tests rarely surface this; orchestration-level and chaos tests do.
+
+---
+
+### Reinforcement as a Multiplier
+
+Drift becomes infrastructure when metrics reinforce artifact-consistent behavior.
+
+**Anti-pattern:**
+- Eval dataset derived from agent outputs
+- Dashboard tracks only task completion
+- No independent ground-truth check
+
+You are optimizing for internal consistency, not correctness.
+
+#### Reinforcement Asymmetry Rule
+
+For every outcome metric, include:
+- Process integrity metric (contract adherence rate)
+- Boundary validation metric (edge guard violation frequency)
+- Counterfactual robustness metric (perturbation tests)
+
+**See:** [Performance Engineering](#performance-engineering-from-metrics-to-telemetry) for the full metric topology and eval infrastructure patterns.
+
+---
+
+### Boundary Discipline Requirements
+
+These extend techniques from [State Scope & Ownership](#state-scope--ownership-local-vs-global-state), [Multi-Agent State Contracts](#multi-agent-state-contracts--handoff-validation), and [Memory Lifecycle Anti-Bloat Patterns](#memory-lifecycle--anti-bloat-patterns).
+
+#### 1) Contract Enforcement
+
+Every shared field must define:
+- Owner
+- Allowed writers
+- Invariants
+- Failure behavior
+
+Example:
+```python
+def validate_approval_status(value: str) -> None:
+    """Edge guard for approvalStatus field."""
+    allowed = {"pending", "approved", "rejected"}
+    if value not in allowed:
+        raise ContractViolation(f"Invalid approvalStatus: {value}")
+```
+
+Contracts are drift containment mechanisms.
+
+#### 2) Edge Guards
+
+Every handoff must:
+- Validate schema and invariants
+- Fail fast
+- Route to an error handler node
+
+Do not silently coerce. See [Handoff Validation with Edge Guards](#handoff-validation-with-edge-guards) for implementation patterns.
+
+#### 3) Decision Lineage Logging
+
+Log:
+- Which agent wrote each field
+- Under which contract version
+- With what validation result
+
+Lineage belongs in logs, not just state.
+
+#### 4) Memory Provenance
+
+Memory writes must include provenance:
+- Source (human | agent | tool)
+- Confidence score
+- Contract version
+- Validation status
+
+Example:
+```json
+{
+  "fact": "User prefers concise answers",
+  "source": "agent",
+  "validated": true,
+  "contract_version": "v3.2",
+  "confidence": 0.92
+}
+```
+
+#### 5) Reinforcement Governance
+
+Evaluation pipelines must:
+- Use holdout datasets not derived from agent artifacts
+- Version metrics
+- Periodically rotate evaluation criteria
+
+Avoid metric monoculture.
+
+---
+
+### Integrity Monitor (Observability Layer)
+
+Introduce a separate component: **Integrity Monitor**.
+
+**Inputs:**
+- Contract violation logs
+- Validation pass rates
+- Memory write metadata
+- Eval results
+- Human override frequency
+
+**Outputs:**
+- Drift alerts
+- Contract deprecation recommendations
+- Metric rotation triggers
+- Escalation flags
+
+This component operates on logs and state snapshots, not on live task context.
+
+**Authority drift:** gradual expansion of decisions left to automation without explicit policy change.
+
+**Monitor:** human override rate over time, automated decision scope growth, and contract changes without review.
+
+---
+
+### Drift Escalation Signals
+
+Monitor for:
+
+| Signal | Detection Mechanism |
+|---|---|
+| Declining validation rate | Track edge guard pass ratio |
+| Metric monoculture | Count distinct metric categories |
+| Normalized boundary violations | Compare new vs recurring violation types |
+| Revision resistance | Track memory schema version change frequency |
+| Rising automation scope | Log % of decisions automated |
+
+Escalation is gradual; telemetry must surface it early.
+
+---
+
+### Core Principle
+
+> Scaling agents without scaling boundary discipline increases drift velocity faster than coordination benefit.
+
+Every time you add an agent, edge, memory depth, or retraining loop, you must also update contracts, edge guards, telemetry, and eval pipelines.
+
+---
+
+### Pre-Scale Checklist
+
+Before increasing system complexity:
+
+- [ ] All shared fields have explicit contracts and invariants
+- [ ] Every inter-agent edge has validation and fail-fast routing
+- [ ] Memory writes include provenance metadata
+- [ ] Eval pipeline includes process-integrity metrics
+- [ ] Integrity Monitor is deployed and reporting
+- [ ] Drift telemetry dashboards are versioned
+- [ ] Contract versions are logged and auditable
+
+Use this checklist as a CI/CD gate before topology changes.
+
+---
+
+### Cross-References
+
+- [State Scope & Ownership](#state-scope--ownership-local-vs-global-state) — scope model and ownership rules
+- [Multi-Agent State Contracts & Handoff Validation](#multi-agent-state-contracts--handoff-validation) — contract schemas and edge guard implementation
+- [Memory Lifecycle & Anti-Bloat Patterns](#memory-lifecycle--anti-bloat-patterns) — memory-qualifying filters and pruning
+- [Performance Engineering: From Metrics to Telemetry](#performance-engineering-from-metrics-to-telemetry) — metric topology and eval infrastructure
+
+---
+
+**Final Design Mandate:**
+
+A well-architected agentic system does not just act. It can explain its state transitions, trace its decision lineage, detect its own drift, refuse unsafe boundary crossings, and recalibrate reinforcement loops.
+
+Resilience emerges from disciplined boundaries. Without them, scaling amplifies distortion.
 
 ⸻
 
