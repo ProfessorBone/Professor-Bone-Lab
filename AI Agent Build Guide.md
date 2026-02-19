@@ -60,24 +60,30 @@ The AGI Architecture Blueprint, 9-Phase Roadmap, and Systems Diagrams are advanc
 ⸻
 
 ## Table of Contents
-• Agent Foundations: From Environment to Architecture
-• The Standard RAG-Agent Build Workflow
-• Connecting PEAS to the Build Workflow
-• Performance Engineering: From Metrics to Telemetry
-• State Scope & Ownership (Local vs Global State)
-• Memory Lifecycle & Anti-Bloat Patterns
-• State Persistence: Checkpoints, Event Logs, and Replay
-• Observability: Mapping State Updates to Telemetry (Without State Dumps)
-• System Prompt Architecture: Modular Prompt Blocks + State Integration
-• Multi-Agent State Contracts & Handoff Validation
-• Drift and Boundary Discipline in Agentic Systems
-• State Safety: PII, Retention, and Redaction
-• Tier 0 · Prereqs & Principles
-• Tier 1 · Basic Agent (MVP Chat + Single Tool)
-• Tier 2 · Intermediate Agent (RAG + Tools + Simple Memory)
-• Tier 3 · Advanced Agent (Multi-Agent + Planning + Observability)
-• Tier 4 · Kick-Ass Agent (Enterprise-Grade, Self-Improving)
-• Appendices: Templates, Evaluation, Security, Stack, Learning Resources, AGI Architecture Blueprint, The 9-Phase AGI Roadmap, Complete Systems Architecture Diagrams, Glossary of Terms, and Common Pitfalls & Anti-Patterns
+
+- [Agent Foundations: From Environment to Architecture](#agent-foundations-from-environment-to-architecture)
+- [The Standard RAG-Agent Build Workflow](#the-standard-rag-agent-build-workflow)
+- [Connecting PEAS to the Build Workflow](#connecting-peas-to-the-build-workflow)
+- [Performance Engineering: From Metrics to Telemetry](#performance-engineering-from-metrics-to-telemetry)
+- [Memory Architecture: The Complete Picture](#memory-architecture-the-complete-picture)
+- [State Scope & Ownership (Local vs Global State)](#state-scope--ownership-local-vs-global-state)
+- [Memory Lifecycle & Anti-Bloat Patterns](#memory-lifecycle--anti-bloat-patterns)
+- [State Persistence: Checkpoints, Event Logs, and Replay](#state-persistence-checkpoints-event-logs-and-replay)
+- [Addendum: Hybrid Persistence Under Log/Event Divergence](#addendum-hybrid-persistence-under-logevent-divergence)
+- [Observability: Mapping State Updates to Telemetry (Without State Dumps)](#observability-mapping-state-updates-to-telemetry-without-state-dumps)
+- [System Prompt Architecture: Modular Prompt Blocks + State Integration](#system-prompt-architecture-modular-prompt-blocks--state-integration)
+- [Multi-Agent State Contracts & Handoff Validation](#multi-agent-state-contracts--handoff-validation)
+- [Multi-Agent Prompt Standards (Supervisor–Worker)](#multi-agent-prompt-standards-supervisorworker)
+- [Drift and Boundary Discipline in Agentic Systems](#drift-and-boundary-discipline-in-agentic-systems)
+- [State Safety: PII, Retention, and Redaction](#state-safety-pii-retention-and-redaction)
+- [State Anti-Patterns (Avoid These)](#state-anti-patterns-avoid-these)
+- [End-of-Task Teardown (Lifecycle Closure)](#end-of-task-teardown-lifecycle-closure)
+- [Tier 0 · Prereqs & Principles](#tier-0--prereqs--principles)
+- [Tier 1 · Basic Agent (MVP Chat + Single Tool)](#tier-1--basic-agent-mvp-chat--single-tool)
+- [Tier 2 · Intermediate Agent (RAG + Tools + Simple Memory)](#tier-2--intermediate-agent-rag--tools--simple-memory)
+- [Tier 3 · Advanced Agent (Multi-Agent + Planning + Observability)](#tier-3--advanced-agent-multi-agent--planning--observability)
+- [Tier 4 · Kick-Ass Agent (Enterprise-Grade, Self-Improving)](#tier-4--kick-ass-agent-enterprise-grade-self-improving)
+- [Appendices](#appendices)
 
 ⸻
 
@@ -674,7 +680,11 @@ If a metric cannot be computed from available data, traced through the system, e
 
 This section converts "Performance" from a conceptual requirement into an engineering discipline.
 
-**See also:** [Drift and Boundary Discipline](#drift-and-boundary-discipline-in-agentic-systems) — how metrics can reinforce drift if not governed with process-integrity checks.
+**See also:**
+- [Drift and Boundary Discipline](#drift-and-boundary-discipline-in-agentic-systems) — how metrics can reinforce drift if not governed with process-integrity checks
+- [Observability](#observability-mapping-state-updates-to-telemetry-without-state-dumps) — telemetry implementation patterns for metrics
+- [State Scope & Ownership](#state-scope--ownership-local-vs-global-state) — scope model for metric data sources
+- [Multi-Agent State Contracts](#multi-agent-state-contracts--handoff-validation) — contract validation as a process-integrity metric
 
 ---
 
@@ -2030,9 +2040,14 @@ def recover_state(task_id: str) -> AgentState:
 
 ## Addendum: Hybrid Persistence Under Log/Event Divergence
 
-### Status: Canonical Extension
-### Domain: Persistence · Observability · Governance
-### Risk Class: Decision Integrity Failure
+> **Status:** Canonical Extension  
+> **Domain:** Agent Architecture / Distributed Systems  
+> **Risk Class:** Medium (Decision Integrity Failure)  
+> **Introduced:** 2026-02  
+> **Depends On:** [State Persistence](#state-persistence-checkpoints-event-logs-and-replay)  
+> **Affects:** [Multi-Agent State Contracts](#multi-agent-state-contracts--handoff-validation), [Drift and Boundary Discipline](#drift-and-boundary-discipline-in-agentic-systems)  
+
+**Note:** Deterministic anchors + invariant checks function as persistence-time contract validation.
 
 #### 1) Problem Statement
 Hybrid persistence (checkpoint + event replay) is necessary for production-grade agent systems. It is not sufficient.
@@ -2193,6 +2208,11 @@ Checkpoint + event stream is the mechanism.
 Integrity enforcement is the doctrine.
 
 You're not building resilient agent systems if you can't reconstruct truth under pressure.
+
+**See also:**
+- [State Persistence](#state-persistence-checkpoints-event-logs-and-replay) — core checkpoint and event replay patterns
+- [Multi-Agent State Contracts](#multi-agent-state-contracts--handoff-validation) — contract validation at handoff boundaries
+- [Drift and Boundary Discipline](#drift-and-boundary-discipline-in-agentic-systems) — how persistence failures enable systemic drift
 
 ---
 
@@ -2542,6 +2562,10 @@ Before deploying checkpoint/replay logic:
 
 **Cross-Reference (Foundation):**
 Before implementing observability, ensure you have defined computable performance metrics, mapped required data fields to sensors/tool outputs, and specified eval + safety constraints. See: [Performance Engineering: From Metrics to Telemetry](#performance-engineering-from-metrics-to-telemetry).
+
+**See also:**
+- [Drift and Boundary Discipline](#drift-and-boundary-discipline-in-agentic-systems) — telemetry patterns for detecting boundary violations
+- [Multi-Agent State Contracts](#multi-agent-state-contracts--handoff-validation) — contract violations as telemetry events
 
 **Concept Capsule:**
 Every agent state update creates an observability decision: log it, ignore it, or something in between. Dumping full state at every step creates noise, bloats storage, and obscures real issues. This module teaches taxonomy-driven telemetry — map each state update category to the right observability primitive, capture only what matters, and build traces that reveal agent behavior without drowning in data.
@@ -5279,6 +5303,8 @@ Use this checklist as a CI/CD gate before topology changes.
 - [Multi-Agent State Contracts & Handoff Validation](#multi-agent-state-contracts--handoff-validation) — contract schemas and edge guard implementation
 - [Memory Lifecycle & Anti-Bloat Patterns](#memory-lifecycle--anti-bloat-patterns) — memory-qualifying filters and pruning
 - [Performance Engineering: From Metrics to Telemetry](#performance-engineering-from-metrics-to-telemetry) — metric topology and eval infrastructure
+- [Observability](#observability-mapping-state-updates-to-telemetry-without-state-dumps) — telemetry implementation for drift detection
+- [State Persistence](#state-persistence-checkpoints-event-logs-and-replay) — checkpoint validation as boundary discipline
 
 ---
 
