@@ -62,6 +62,8 @@ The AGI Architecture Blueprint, 9-Phase Roadmap, and Systems Diagrams are advanc
 ## Table of Contents
 • Agent Foundations: From Environment to Architecture
 • The Standard RAG-Agent Build Workflow
+• Connecting PEAS to the Build Workflow
+• Performance Engineering: From Metrics to Telemetry
 • State Scope & Ownership (Local vs Global State)
 • Memory Lifecycle & Anti-Bloat Patterns
 • State Persistence: Checkpoints, Event Logs, and Replay
@@ -651,6 +653,230 @@ PEAS Performance: Measure retrieval accuracy
 
 **Reflection Prompt:**
 How would the Week 9 notebook implementation change if the PEAS Environment was "live web search" instead of "static research papers"? What would change in Phase 1? What would stay the same in Phase 2?
+
+⸻
+
+## Performance Engineering: From Metrics to Telemetry
+
+**Concept Capsule:**
+In PEAS, Performance defines success.
+
+In production systems, performance must be:
+• Computable  
+• Observable  
+• Evaluated  
+• Safe  
+• Versioned  
+• Governed  
+
+If a metric cannot be computed from available data, traced through the system, evaluated consistently, and updated safely, it is not a performance metric — it is a slogan.
+
+This section converts "Performance" from a conceptual requirement into an engineering discipline.
+
+---
+
+### 1️⃣ The Performance Lifecycle
+
+Performance in agent systems is not a static mapping. It is a lifecycle:
+
+Define → Compute → Emit → Trace → Evaluate → Optimize → Govern
+
+┌───────────────────────────────────────────────────────────┐
+│                 PERFORMANCE LIFECYCLE                     │
+└───────────────────────────────────────────────────────────┘
+
+Define Metric
+↓
+Specify Formula + Units
+↓
+Map Required Data Fields
+↓
+Identify Sensors / Tool Outputs
+↓
+Emit Telemetry (Spans, Logs, Metrics)
+↓
+Run Evals (Offline + Online)
+↓
+Adjust Policy / Prompts / Architecture
+↓
+Version + Govern
+
+This lifecycle must be embedded into your architecture.
+
+---
+
+### 2️⃣ From PEAS "Performance" to Computable Metric
+
+PEAS asks:
+What does success look like?
+
+Engineering asks:
+What fields must exist to compute it?
+
+Example (RAG agent):
+
+Performance → High-quality answers  
+Computable Metric → answer_relevance_score  
+Formula → Judge(model_output, rubric)  
+Required Data → model_output, ground_truth, rubric_version  
+
+If your system does not emit:
+• model_output  
+• context used  
+• prompt version  
+• tool traces  
+
+Then you cannot compute quality reliably.
+
+---
+
+### 3️⃣ Sensors → Telemetry → Trace Model
+
+Modern agent systems treat observability as distributed tracing, not just logs.
+
+Each action should emit a span with type:
+
+LLM  
+AGENT  
+TOOL  
+RETRIEVER  
+EVALUATOR  
+GUARDRAIL  
+
+Example trace:
+
+AGENT (planner)  
+ ├── RETRIEVER  
+ ├── LLM (answer generation)  
+ ├── EVALUATOR (LLM-as-judge)  
+ └── GUARDRAIL (policy filter)  
+
+This enables:
+• Latency measurement  
+• Cost tracking  
+• Safety auditing  
+• Node-level metrics  
+• Multi-agent debugging  
+
+Observability is not optional in Tier 3+ systems.
+
+---
+
+### 4️⃣ Multi-Agent Metric Topology
+
+In multi-agent orchestration, metrics exist at three levels:
+
+System-Level:
+• end_to_end_success_rate  
+• latency  
+• cost  
+• safety_incidents  
+
+Agent-Level:
+• planner_success_rate  
+• retriever_recall  
+• critic_precision  
+
+Node-Level:
+• tool_timeout_rate  
+• llm_token_cost  
+• retry_count  
+
+Metrics must explicitly declare their scope.
+
+---
+
+### 5️⃣ Evals Infrastructure
+
+Evaluation must distinguish:
+
+Offline Evals:
+• Golden datasets  
+• LLM-as-judge scoring  
+• Regression testing  
+• Safety benchmarks  
+
+Online Evals:
+• A/B tests  
+• Shadow deployments  
+• Real-user metrics  
+
+Each metric must specify:
+• Dataset version  
+• Rubric version  
+• Judge type  
+• Evaluation schedule  
+
+Without this, metrics drift.
+
+---
+
+### 6️⃣ Safety as First-Class Metric
+
+Every production agent must include at least one safety metric:
+
+• policy_violation_rate  
+• unsafe_tool_call_rate  
+• hallucination_rate  
+• bias_score  
+
+These must map to:
+• Guardrail system  
+• Policy engine  
+• Evaluation loop  
+
+Performance without safety is incomplete.
+
+---
+
+### 7️⃣ Lifecycle & Versioning
+
+Every metric definition must include:
+
+• Version  
+• Owner  
+• Change log  
+• Impact analysis  
+
+When metrics change:
+• Eval datasets must update  
+• Baselines must re-run  
+• Dashboards must be version-tagged  
+
+Metrics evolve. Systems must track that evolution.
+
+---
+
+### 8️⃣ Performance Contract Template
+
+Metric Name:  
+Scope: {system / agent / node}  
+Formula:  
+Unit:  
+Direction:  
+Target:  
+
+Required Fields:  
+-  
+
+Telemetry Source:  
+- Span Type:  
+- Emitted From:  
+
+Eval Specification:  
+- Offline Dataset:  
+- Rubric Version:  
+- Judge Type:  
+- Eval Schedule:  
+
+Safety Constraints:  
+- Safety Metric:  
+- Guardrail System:  
+
+Lifecycle:  
+- Version:  
+- Owner:  
+- Last Updated:  
 
 ⸻
 
